@@ -5,7 +5,11 @@ requires-python = ">=3.11"
 dependencies = ["pydantic>=2", "pyyaml"]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = [
+    "mcp<2",
+    "pytest",
+    "ruff",
+]
 
 [build-system]
 requires = ["hatchling"]

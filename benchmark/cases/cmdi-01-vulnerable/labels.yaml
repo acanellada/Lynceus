@@ -1,0 +1,6 @@
+case: cmdi-01-vulnerable
+vulnerabilities:
+  - class: command_injection
+    tool: ping
+    file: server.py
+    parameter: host
