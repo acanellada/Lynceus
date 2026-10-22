@@ -3,7 +3,7 @@ import subprocess
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("cmdi-01-fixed")
-HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 
 
 @mcp.tool()
@@ -19,3 +19,4 @@ def ping(host: str) -> str:
 
 if __name__ == "__main__":
     mcp.run()
+    
