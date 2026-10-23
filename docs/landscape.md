@@ -15,12 +15,12 @@ Fecha de la revisión:
 Cisco mcp-scanner:
 - Test local (21/10/2026): YARA sobre `cmdi-01-vulnerable` y `cmdi-01-fixed` -> Safe en ambos (esperable: solo analiza metadatos).
 - Analizador de comportamiento: NO PROBADO (requiere clave LLM). Pendiente de ejecutar sobre el benchmark completo.
-- Observado: el escáner lanza el servidor objetivo para listar herramientas; mcpval deberá ejecutar siempre en sandbox.
-- Observado: dos generaciones de protocolo (`server/discover` moderno e `initialize()` legacy); el adaptador de mcpval debe soportar ambas.
+- Observado: el escáner lanza el servidor objetivo para listar herramientas; Lynceus deberá ejecutar siempre en sandbox.
+- Observado: dos generaciones de protocolo (`server/discover` moderno e `initialize()` legacy); el adaptador de Lynceus debe soportar ambas.
 
 
 
 
 ## Diferenciación
 
-mcpval se diferencia en:
+Lynceus se diferencia en:
