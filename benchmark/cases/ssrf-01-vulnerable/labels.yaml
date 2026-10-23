@@ -1,0 +1,6 @@
+case: ssrf-01-vulnerable
+vulnerabilities:
+  - class: ssrf
+    tool: fetch
+    file: server.py
+    parameter: url
