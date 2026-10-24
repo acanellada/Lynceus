@@ -1,0 +1,3 @@
+case: ssrf-01-fixed
+vulnerabilities: []
+notes: "Asume hosts permitidos de confianza; urlopen sigue redirecciones."
