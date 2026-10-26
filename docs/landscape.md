@@ -1,6 +1,6 @@
 # Panorama de competidores
 
-Fecha de la revisión: 21-25/10/2026. Fuentes: READMEs públicos, lectura parcial de código y pruebas locales del autor. Lo anotado solo desde un README no está verificado en ejecución.
+Fecha de la revisión: 21-26/10/2026. Fuentes: READMEs públicos, lectura parcial de código, datos del NVD y pruebas locales del autor. Lo anotado solo desde un README no está verificado en ejecución.
 
 | Proyecto | Enfoque (estático/dinámico/runtime) | Qué detecta | Valida con evidencia reproducible (sí/no) | Licencia | Actividad reciente | Qué NO hace |
 |---|---|---|---|---|---|---|
@@ -17,11 +17,13 @@ Fecha de la revisión: 21-25/10/2026. Fuentes: READMEs públicos, lectura parcia
 
 ## Pendientes de revisar
 
+- MCP Watch: aparece en el NVD descrito como "comprehensive security scanner for MCP servers" (CVE-2025-66401). No revisado.
 - Papers y benchmarks académicos de seguridad de MCP (taxonomías y posibles benchmarks públicos de escáneres).
 - Servidores MCP vulnerables a propósito (corpus para el benchmark; comprobar licencia).
 - promptfoo (¿tiene pruebas específicas de MCP?).
 - CodeQL sobre los 6 casos del benchmark.
 - Modo behavioral de Cisco (requiere clave LLM).
+- Recuento de servidores MCP por lenguaje (decide la prioridad de un segundo adaptador).
 
 ## Línea base SAST genérico (22-23/10/2026, n=1 por clase, casos del autor)
 
@@ -35,7 +37,7 @@ Fecha de la revisión: 21-25/10/2026. Fuentes: READMEs públicos, lectura parcia
 | ssrf-01-fixed | B310 Medium | dynamic-urllib-use-detected |
 
 Lectura:
-- Inyección de comandos: resuelta por SAST genérico (Semgrep distingue el caso corregido).
+- Inyección de comandos: detectada por SAST genérico (Semgrep distingue el caso corregido).
 - SSRF: las reglas son de patrón y no distinguen validación de host (marcan vulnerable y corregido por igual).
 - Path traversal: sin cobertura en ninguna configuración probada.
 
@@ -75,20 +77,43 @@ Limitaciones: n=1 por clase, casos del autor, sin CodeQL (probablemente cubre pa
 
 ### Qué está cubierto y qué no
 
-- Bien cubierto: metadatos, prompt injection y tool poisoning (Cisco, Snyk, MCP-Shield, según sus READMEs); cadena de suministro (Cisco); control en ejecución (mcp-context-protector); inyección de comandos (SAST genérico).
+- Bien cubierto: metadatos, prompt injection y tool poisoning (Cisco, Snyk, MCP-Shield, según sus READMEs); cadena de suministro (Cisco); control en ejecución (mcp-context-protector); detección de inyección de comandos (SAST genérico).
 - Mal cubierto: SSRF (reglas de patrón que no distinguen una validación real).
 - No encontrado en lo revisado: path traversal en servidores MCP; autorización con fallo abierto; y verificación de cada hallazgo con una reproducción. Esto último, ninguno de los cinco proyectos lo describe ni lo muestra en el código leído, pero la revisión es parcial.
+
+## Evidencia: CVE publicados (NVD, 25/10/2026)
+
+Muestra: 524 CVE únicos que mencionan "model context protocol" o "mcp server", 38 de ellos de SDK. Incluye también clientes y frameworks, no solo servidores. Un CVE puede contar en varias clases y no se midió cuántos carecen de CWE. Cifras orientativas.
+
+| Clase | CVE | % |
+|---|---|---|
+| Inyección de comandos, argumentos y código | 110 | 21 % |
+| Autenticación y origen | 93 | 18 % |
+| SSRF | 91 | 17 % |
+| Autorización | 57 | 11 % |
+| Ruta y ficheros | 52 | 10 % |
+| Denegación de servicio | 19 | 4 % |
+
+Lecturas:
+- La inyección de comandos y argumentos es la clase más frecuente: el valor de Lynceus ahí es confirmar con una ejecución, no detectar.
+- Autenticación, origen y autorización suman hasta unos 150 CVE y dependen del despliegue (HTTP): candidatas a v2, con ventaja sobre el análisis estático.
+- Herramientas de prueba y escáneres con CVE propios (MCP Inspector, MCPJam Inspector, MCP Watch): ejecutar siempre en sandbox.
 
 ## Direcciones evaluadas
 
 | Dirección | Cubierta por alguien (sí/no/no sé) | Medible con un caso (sí/no) | Veredicto |
 |---|---|---|---|
-| Autorización con fallo abierto (patrón del issue #59) | No sé; ningún SAST de patrón parece verla | Sí: caso `authz-01` | Candidata, pendiente de medir |
-| Autenticación y exposición de servidores | No sé | Sí: caso `auth-01` | Pendiente |
-| Del exploit al test de regresión | No en los cinco proyectos revisados (solo README y código leído en parte) | Sí, una vez exista el validador | Candidata fuerte, depende del MVP |
-| Benchmark público de escáneres de MCP | No sé; pendiente de buscar en papers | No (es un entregable, no un caso) | Pendiente |
-| Permisos y secretos | Parcial: Cisco, Snyk y MCP-Shield a nivel de metadatos; MCPSafetyScanner a nivel de entorno | Sí | Pendiente |
+| Inyección de comandos y argumentos con confirmación dinámica | Detección sí (SAST); confirmación no vista en los cinco proyectos | Sí (cmdi-01) | v1 |
+| SSRF y path traversal con confirmación dinámica | Detección parcial o nula (SAST de patrón) | Sí (ssrf-01, ptrav-01) | v1 |
+| Autenticación, origen y autorización sobre HTTP | No sé; el análisis estático apenas la ve | Sí (auth-01, authz-01), con otro banco de pruebas | v2, alta prioridad de mercado |
+| Del exploit al test de regresión | No en los cinco proyectos revisados | Sí, cuando exista el validador | Candidata fuerte |
+| Benchmark público de escáneres de MCP | No sé; pendiente de buscar en papers | No (entregable) | Pendiente |
+| Permisos y secretos | Parcial a nivel de metadatos | Sí | Baja prioridad |
 
 ## Diferenciación (hipótesis a validar con el benchmark)
 
-Lynceus se diferencia en: (1) reportar solo fallos de implementación **confirmados con una reproducción** en un sandbox; ninguno de los cinco proyectos revisados lo describe, y MCPSafetyScanner, que usa agentes, no contiene paso de verificación en el código visto; (2) cubrir clases que el SAST de patrón no ve o no distingue (path traversal, SSRF, autorización con fallo abierto); (3) publicar un benchmark con métricas comparables. La inyección de comandos no es un argumento de detección: ya está cubierta. Supuestos sin verificar: CodeQL y el modo behavioral de Cisco.
+Lynceus se diferencia en: (1) reportar solo fallos de implementación confirmados con una reproducción en un sandbox (ninguno de los cinco proyectos revisados lo describe; MCPSafetyScanner, que usa agentes, no contiene paso de verificación en el código visto); (2) cubrir clases que el SAST de patrón no ve o no distingue (path traversal, SSRF, autorización con fallo abierto); (3) publicar un benchmark con métricas comparables.
+
+La inyección de comandos es la clase más frecuente en los CVE y el SAST la detecta: ahí el valor es la confirmación, no la detección.
+
+Supuestos sin verificar: CodeQL, el modo behavioral de Cisco, y que los desarrolladores de MCP no usen hoy herramientas de SAST (requiere hablar con ellos).
