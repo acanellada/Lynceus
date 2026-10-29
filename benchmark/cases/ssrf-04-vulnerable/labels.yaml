@@ -1,0 +1,6 @@
+case: ssrf-04-vulnerable
+vulnerabilities:
+  - class: ssrf
+    tool: proxy_request
+    file: server.py
+    parameter: target

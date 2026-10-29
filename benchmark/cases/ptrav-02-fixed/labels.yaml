@@ -1,0 +1,3 @@
+case: ptrav-02-fixed
+vulnerabilities: []
+notes: "BASE y el destino se resuelven con os.path.realpath (sigue symlinks) antes de comparar con os.path.commonpath, lo que detecta tanto '..' como la ruta absoluta que, con os.path.join, pisaría BASE; asume que BASE no es la raíz del sistema de ficheros."

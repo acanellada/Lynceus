@@ -1,0 +1,6 @@
+case: ptrav-03-vulnerable
+vulnerabilities:
+  - class: path_traversal
+    tool: read_report
+    file: server.py
+    parameter: filename

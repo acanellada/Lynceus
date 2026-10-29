@@ -1,0 +1,3 @@
+case: cmdi-03-fixed
+vulnerabilities: []
+notes: "--end-of-options impide que ref se interprete como opción (a diferencia de '--', que en git log cambiaría el significado a un filtro de ruta) y la regex rechaza referencias que empiecen por '-'; asume git >= 2.24 (soporta --end-of-options) y que /repo no contiene refs ambiguas creadas por el atacante."

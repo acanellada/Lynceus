@@ -1,0 +1,6 @@
+case: ptrav-04-vulnerable
+vulnerabilities:
+  - class: path_traversal
+    tool: read_upload
+    file: server.py
+    parameter: name

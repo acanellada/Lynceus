@@ -1,0 +1,6 @@
+case: ssrf-03-vulnerable
+vulnerabilities:
+  - class: ssrf
+    tool: register_callback
+    file: server.py
+    parameter: url

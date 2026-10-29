@@ -1,0 +1,3 @@
+case: cmdi-02-fixed
+vulnerabilities: []
+notes: "shlex.quote neutraliza los metacaracteres de shell en pattern antes de interpolarlo en el comando; sigue usando /bin/sh vía os.system, así que asume que no hay otra vía de inyección (p.ej. variables de entorno) ajena al propio pattern."

@@ -1,0 +1,3 @@
+case: ptrav-04-fixed
+vulnerabilities: []
+notes: "resolve() sigue enlaces simbólicos antes de comprobar is_relative_to contra BASE; sigue abierta una ventana TOCTOU si el enlace se crea o se redirige entre la comprobación y la lectura del fichero."

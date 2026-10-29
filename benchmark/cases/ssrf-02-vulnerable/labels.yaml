@@ -1,0 +1,6 @@
+case: ssrf-02-vulnerable
+vulnerabilities:
+  - class: ssrf
+    tool: fetch_webhook
+    file: server.py
+    parameter: url

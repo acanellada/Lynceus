@@ -11,10 +11,10 @@ BENCHMARK_DIR = Path(__file__).resolve().parents[2] / "benchmark" / "cases"
 def test_load_real_benchmark_cases():
     labels_by_case = load_labels(BENCHMARK_DIR)
 
-    assert len(labels_by_case) == 6
+    assert len(labels_by_case) == 24
 
     all_labels = [label for labels in labels_by_case.values() for label in labels]
-    assert len(all_labels) == 3
+    assert len(all_labels) == 12
     assert {label.vuln_class for label in all_labels} == {
         VulnClass.COMMAND_INJECTION,
         VulnClass.PATH_TRAVERSAL,

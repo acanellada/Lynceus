@@ -1,0 +1,3 @@
+case: ssrf-03-fixed
+vulnerabilities: []
+notes: "register_callback exige https y una IP pública resuelta en el momento del registro; ping_callback vuelve a resolver el host por nombre al conectar, así que un atacante con control de DNS podría cambiar la IP entre ambas llamadas (DNS rebinding), salvo que la petición se haga contra la IP ya comprobada. Solo comprueba la IP IPv4; no cubre registros IPv6."

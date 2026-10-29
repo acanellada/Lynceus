@@ -1,0 +1,3 @@
+case: ssrf-02-fixed
+vulnerabilities: []
+notes: "allow_redirects=False impide que una redirección posterior escape del allowlist de hosts, y se exige https; no se resuelve la IP del host, así que asume que ALLOWED_HOSTS no resuelve a rangos privados."

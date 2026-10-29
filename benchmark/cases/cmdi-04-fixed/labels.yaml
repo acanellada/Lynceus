@@ -1,0 +1,3 @@
+case: cmdi-04-fixed
+vulnerabilities: []
+notes: "opts solo se acepta si coincide exactamente con un valor de ALLOWED_OPTS, y create_subprocess_exec no pasa por un shell; asume que esa lista cerrada no se amplía con valores sin auditar."

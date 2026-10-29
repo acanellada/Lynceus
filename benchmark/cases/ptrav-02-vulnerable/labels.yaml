@@ -1,0 +1,6 @@
+case: ptrav-02-vulnerable
+vulnerabilities:
+  - class: path_traversal
+    tool: get_asset
+    file: server.py
+    parameter: path

@@ -1,0 +1,6 @@
+case: cmdi-03-vulnerable
+vulnerabilities:
+  - class: command_injection
+    tool: git_log
+    file: server.py
+    parameter: ref

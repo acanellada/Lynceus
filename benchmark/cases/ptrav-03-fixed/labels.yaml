@@ -1,0 +1,3 @@
+case: ptrav-03-fixed
+vulnerabilities: []
+notes: "filename debe coincidir exactamente con un nombre de ALLOWED_FILENAMES, así que no hay construcción de ruta a partir de entrada no validada; añadir un informe nuevo requiere incluirlo explícitamente en esa lista."

@@ -1,0 +1,6 @@
+case: cmdi-04-vulnerable
+vulnerabilities:
+  - class: command_injection
+    tool: convert_image
+    file: server.py
+    parameter: opts

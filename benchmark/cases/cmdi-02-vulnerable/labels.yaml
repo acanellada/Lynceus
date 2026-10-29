@@ -1,0 +1,6 @@
+case: cmdi-02-vulnerable
+vulnerabilities:
+  - class: command_injection
+    tool: search_logs
+    file: server.py
+    parameter: pattern
