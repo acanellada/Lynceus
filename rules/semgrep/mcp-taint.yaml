@@ -1,0 +1,79 @@
+rules:
+  - id: lynceus-mcp-param-to-shell
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: Un parámetro de herramienta MCP llega a un comando de shell sin neutralizar
+    metadata:
+      cwe: "CWE-78"
+    pattern-sources:
+      - patterns:
+          - pattern: |
+              @$MCP.tool(...)
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - focus-metavariable: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: subprocess.$FN($CMD, ..., shell=True, ...)
+          - focus-metavariable: $CMD
+    pattern-sanitizers:
+      - patterns:
+          - pattern: $RE.fullmatch($X)
+          - focus-metavariable: $X
+        by-side-effect: true
+
+  - id: lynceus-mcp-param-to-path
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: Un parámetro de herramienta MCP llega a una operación de fichero sin comprobar el directorio
+    metadata:
+      cwe: "CWE-22"
+    pattern-sources:
+      - patterns:
+          - pattern: |
+              @$MCP.tool(...)
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - focus-metavariable: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: open($P, ...)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $P.read_text(...)
+          - focus-metavariable: $P
+      - patterns:
+          - pattern: $P.read_bytes(...)
+          - focus-metavariable: $P
+    pattern-sanitizers:
+      - patterns:
+          - pattern: $P.is_relative_to(...)
+          - focus-metavariable: $P
+        by-side-effect: true
+
+  - id: lynceus-mcp-param-to-request
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: Un parámetro de herramienta MCP decide a qué dirección hace una petición el servidor
+    metadata:
+      cwe: "CWE-918"
+    pattern-sources:
+      - patterns:
+          - pattern: |
+              @$MCP.tool(...)
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - focus-metavariable: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: urllib.request.urlopen($U, ...)
+          - focus-metavariable: $U
+      - patterns:
+          - pattern: requests.$M($U, ...)
+          - focus-metavariable: $U
+      - patterns:
+          - pattern: httpx.$M($U, ...)
+          - focus-metavariable: $U
