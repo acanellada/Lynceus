@@ -23,7 +23,6 @@ Fecha de la revisión: 21-27/10/2026. Fuentes: READMEs públicos, lectura parcia
 - promptfoo (¿tiene pruebas específicas de MCP?).
 - Modo behavioral de Cisco (requiere clave LLM).
 - Recuento de servidores MCP por lenguaje (decide la prioridad de un segundo adaptador).
-- Prueba de un detector con fuentes MCP propias (por ejemplo, reglas propias de Semgrep en modo taint) sobre los 6 casos.
 
 ## Línea base SAST genérico (22-23/10/2026, n=1 por clase, casos del autor)
 
@@ -56,6 +55,16 @@ Lectura (hipótesis respaldada en las tres clases, no probada): CodeQL no recono
 Limitaciones: n=1 por clase, casos del autor, versión concreta de las consultas, y resultado válido solo para Python.
 
 Licencia (lectura propia, no asesoramiento legal): los términos del CLI permiten investigación académica y análisis de código abierto (OSI) en local, y prohíben analizar código no abierto sin licencia de GitHub Advanced Security y distribuir, integrar u ofrecer el software como servicio alojado. Conclusión: usable como línea base del benchmark (repo público, Apache-2.0), no como componente de Lynceus.
+
+## Prueba de reglas taint propias (Semgrep, 29/10/2026, n=1 por clase, casos del autor)
+
+Reglas: `rules/semgrep/mcp-taint.yaml` (3 reglas, escritas por el autor). La fuente son los parámetros de las funciones decoradas con `@x.tool()`; los sumideros dependen de la clase (shell, ficheros, peticiones).
+
+Resultado: 4 hallazgos en 6 casos. Detecta los 3 casos vulnerables (inyección de comandos, path traversal y SSRF), deja limpios cmdi-01-fixed y ptrav-01-fixed y marca ssrf-01-fixed.
+
+Lectura: declarar los parámetros de las herramientas MCP como fuente no confiable basta, en estos casos, para detectar el path traversal que ninguna configuración anterior detectaba. El falso positivo de ssrf-01-fixed se debe a que la validación se hace sobre parsed.hostname y no sobre la URL: es el tipo de candidato que debe descartar la confirmación dinámica (un canario que no recibe ninguna petición).
+
+Limitaciones: las reglas y los casos los escribió la misma persona, conociéndolos; n=1 por clase; sin variantes de elusión (rutas absolutas, enlaces simbólicos, redirecciones). Los sanitizadores por efecto lateral son permisivos (cualquier llamada a fullmatch o is_relative_to cuenta como validación aunque no se use su resultado) y pueden provocar falsos negativos. No es una tasa de detección.
 
 ## Hallazgos
 
@@ -119,7 +128,7 @@ Lecturas:
 |---|---|---|---|
 | Inyección de comandos y argumentos con confirmación dinámica | Detección sí (Bandit, Semgrep); confirmación no vista en los cinco proyectos | Sí (cmdi-01) | v1 |
 | SSRF y path traversal con confirmación dinámica | Detección parcial o nula (Bandit, Semgrep, CodeQL) | Sí (ssrf-01, ptrav-01) | v1 |
-| Modelo de fuentes y sumideros específico de MCP (parámetro de herramienta como fuente no confiable) | No en lo probado: ni Bandit, ni Semgrep ni CodeQL lo modelan | Sí, con los 6 casos | v1, pieza técnica central |
+| Modelo de fuentes y sumideros específico de MCP (parámetro de herramienta como fuente no confiable) | No en lo probado: ni Bandit, ni Semgrep ni CodeQL lo modelan | Probado con los 6 casos: detecta los 3 vulnerables y marca 1 corregido | v1, pieza técnica central; falta medir con variantes de elusión |
 | Autenticación, origen y autorización sobre HTTP | No sé; el análisis estático apenas la ve | Sí (auth-01, authz-01), con otro banco de pruebas | v2, alta prioridad de mercado |
 | Del exploit al test de regresión | No en los cinco proyectos revisados | Sí, cuando exista el validador | Candidata fuerte |
 | Benchmark público de escáneres de MCP | No sé; pendiente de buscar en papers | No (entregable) | Pendiente |
