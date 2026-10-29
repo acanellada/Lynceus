@@ -34,7 +34,7 @@ def enclosing_function(path: Path, line: int) -> str | None:
 
 
 def run_semgrep() -> dict:
-    cmd = ["uvx", "semgrep", "--config", str(RULES), "--metrics=off", "--json", "--quiet", str(BENCH)]
+    cmd = ["uvx", "semgrep==1.183.0", "--config", str(RULES), "--metrics=off", "--json", "--quiet", str(BENCH)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode not in (0, 1):
         sys.exit(f"Semgrep falló ({proc.returncode}):\n{proc.stderr}")
