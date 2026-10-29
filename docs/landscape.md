@@ -66,6 +66,21 @@ Lectura: declarar los parámetros de las herramientas MCP como fuente no confiab
 
 Limitaciones: las reglas y los casos los escribió la misma persona, conociéndolos; n=1 por clase; sin variantes de elusión (rutas absolutas, enlaces simbólicos, redirecciones). Los sanitizadores por efecto lateral son permisivos (cualquier llamada a fullmatch o is_relative_to cuenta como validación aunque no se use su resultado) y pueden provocar falsos negativos. No es una tasa de detección.
 
+## Benchmark ampliado (30/10/2026, 24 casos, Semgrep 1.183.0)
+
+18 casos nuevos escritos sin acceso a las reglas, más los 6 iniciales. Evaluación con `scripts/eval_semgrep.py` y `rules/semgrep/mcp-taint.yaml`.
+
+| Clase | TP | FP | FN | Precisión | Recall |
+|---|---|---|---|---|---|
+| Inyección de comandos | 1 | 0 | 3 | 1,00 | 0,25 |
+| Path traversal | 3 | 1 | 1 | 0,75 | 0,75 |
+| SSRF | 2 | 1 | 2 | 0,67 | 0,50 |
+| Global | 6 | 2 | 6 | 0,75 | 0,50 |
+
+Lectura: los falsos negativos vienen de sumideros no cubiertos (os.system, asyncio.create_subprocess_shell, inyección de argumentos sin shell), de flujo entre funciones auxiliares y de flujo entre herramientas mediante estado. Los falsos positivos, de validaciones que la regla no reconoce (listas de permitidos). Algunos casos corregidos salen limpios porque usan sumideros no modelados, no porque la validación se reconozca: la precisión sobre corregidos está inflada por puntos ciegos.
+
+Conclusión: el análisis estático por reglas cubre el flujo directo, pero no el flujo entre funciones ni entre herramientas. La validación dinámica, que no depende del flujo, pasa a ser la prioridad. Estos 18 casos ya se han visto: la cifra publicable requerirá un lote nuevo no usado para ajustar.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
