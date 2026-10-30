@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 
 app = FastMCP("ptrav-03-vulnerable")
-BASE_DIR = "/srv/reports"
+BASE_DIR = __file__.rsplit("/", 1)[0] + "/reports"
 
 
 @app.tool()

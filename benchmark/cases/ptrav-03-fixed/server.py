@@ -1,7 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 
 app = FastMCP("ptrav-03-fixed")
-BASE_DIR = "/srv/reports"
+BASE_DIR = __file__.rsplit("/", 1)[0] + "/reports"
 ALLOWED_FILENAMES = {"summary.txt", "incidents.txt", "audit.txt"}
 
 
