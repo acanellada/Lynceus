@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest)",
+      "Bash(uv run ruff check)",
+      "Bash(docker build -t lynceus-sandbox:0.1 sandbox/)",
+      "Bash(uv run python scripts/list_tools.py)",
+      "Bash(uv run python scripts/eval_semgrep.py)",
+      "Bash(uv run python scripts/eval_dynamic.py)"
+    ],
+    "ask": [
+      "Bash",
+      "Edit(.claude/**)",
+      "Write(.claude/**)"
+    ]
+  }
+}
