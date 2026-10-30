@@ -81,6 +81,19 @@ Lectura: los falsos negativos vienen de sumideros no cubiertos (os.system, async
 
 Conclusión: el análisis estático por reglas cubre el flujo directo, pero no el flujo entre funciones ni entre herramientas. La validación dinámica, que no depende del flujo, pasa a ser la prioridad. Estos 18 casos ya se han visto: la cifra publicable requerirá un lote nuevo no usado para ajustar.
 
+## Validación dinámica: inyección de comandos (30/10/2026, 8 casos)
+
+Sandbox Docker endurecido (sin red, sistema de ficheros de solo lectura, /tmp limitado y sin ejecución, sin capacidades ni privilegios, límites de procesos, memoria y CPU). Herramientas y parámetros descubiertos con list_tools; 7 técnicas de carga fijas, con y sin prefijo inocuo; un servidor nuevo por intento; canario en /tmp comprobado por el harness.
+
+| Método | TP | FP | FN | Precisión | Recall |
+|---|---|---|---|---|---|
+| Reglas de Semgrep | 1 | 0 | 3 | 1,00 | 0,25 |
+| Validación dinámica | 3 | 0 | 1 | 1,00 | 0,75 |
+
+Lectura: la validación dinámica confirma cmdi-02 (os.system en una función auxiliar) y cmdi-04 (create_subprocess_shell en una herramienta asíncrona), que las reglas no veían, sin marcar ningún caso corregido. El falso negativo es cmdi-03, inconcluso porque el caso necesita un repositorio en /repo que el sandbox no tiene.
+
+Limitaciones: 8 casos (4 vulnerables), una sola clase, casos escritos por un agente. El canario lo comprueba el harness, dentro del mismo contenedor que el servidor: un servidor malicioso podría fingir un positivo. Los errores de entorno se detectan por texto. Un error de transporte puntual (BrokenResourceError) no se reintenta.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
