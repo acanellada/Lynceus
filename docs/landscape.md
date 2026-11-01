@@ -113,6 +113,19 @@ En cmdi-02-vulnerable, el intento con `lynceus && touch <canario>` termina siemp
 
 Rendimiento: la validación de inyección de comandos tarda unos 3,5 minutos en 8 casos (unos 2 segundos por intento, por arrancar un servidor nuevo en cada uno). Pendiente: paralelizar o reutilizar el contenedor, y matar el contenedor también ante una interrupción.
 
+## Validación dinámica: SSRF (01/11/2026, 8 casos)
+
+Por cada caso, una red Docker interna (sin salida) creada y borrada en cada ejecución, con dos contenedores endurecidos: el servidor y un receptor HTTP mínimo que registra cada petición. Antes de los intentos, un contenedor efímero comprueba que no hay salida TCP ni resolución DNS externa; si la hay, la validación aborta (fallo cerrado). El oráculo lee el registro del receptor desde fuera: por primera vez, el servidor no puede fingir un positivo. Tres técnicas: URL con el nombre del receptor, con su IP, y `file://` con canario de lectura. Intentos en dos pasos: tras la llamada con la carga, se llama a las demás herramientas reutilizando por nombre los valores de la primera llamada.
+
+| Método | TP | FP | FN | Precisión | Recall |
+|---|---|---|---|---|---|
+| Reglas de Semgrep | 2 | 1 | 2 | 0,67 | 0,50 |
+| Validación dinámica | 4 | 0 | 0 | 1,00 | 1,00 |
+
+Lectura: ssrf-01-fixed, el falso positivo de las reglas que originó la tesis del proyecto, queda descartado porque el receptor no recibe ninguna petición. ssrf-03-vulnerable (una herramienta guarda la URL y otra hace la petición) se confirma gracias a los dos pasos. `file://` confirma ssrf-01 y ssrf-04, donde la SSRF permite además leer ficheros locales.
+
+Limitaciones: 8 casos (4 vulnerables), escritos por un agente. El receptor se da por listo cuando su contenedor está en marcha, no cuando acepta conexiones. La comprobación de aislamiento es puntual, antes de los intentos. El token solo se busca en la ruta de la petición. ssrf.py reutiliza funciones privadas de ptrav.py, pendientes de pasar a un módulo común.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
