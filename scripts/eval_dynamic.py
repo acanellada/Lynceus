@@ -21,14 +21,17 @@ BENCH = ROOT / "benchmark" / "cases"
 _CLASS_CONFIG = {
     "command_injection": {"prefix": "cmdi-", "vuln_class": VulnClass.COMMAND_INJECTION},
     "path_traversal": {"prefix": "ptrav-", "vuln_class": VulnClass.PATH_TRAVERSAL},
+    "ssrf": {"prefix": "ssrf-", "vuln_class": VulnClass.SSRF},
 }
 
 
 def _validate_case_for(vuln_class: VulnClass):
     if vuln_class is VulnClass.COMMAND_INJECTION:
         from lynceus_sec.validator.cmdi import validate_case
-    else:
+    elif vuln_class is VulnClass.PATH_TRAVERSAL:
         from lynceus_sec.validator.ptrav import validate_case
+    else:
+        from lynceus_sec.validator.ssrf import validate_case
     return validate_case
 
 

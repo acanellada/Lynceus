@@ -9,7 +9,12 @@ from lynceus_sec.validator.runner import (
     HARNESS_PATH,
     RunnerError,
     build_docker_command,
+    build_network_create_cmd,
+    build_network_rm_cmd,
+    build_receiver_command,
+    check_network_isolation,
     parse_harness_output,
+    read_receiver_log,
     run_harness,
 )
 
@@ -141,3 +146,119 @@ def test_run_harness_kills_container_on_timeout(monkeypatch):
         run_harness(CASE_DIR, timeout=1)
 
     assert len(killed) == 1
+
+
+# --- SSRF: red interna, receptor, comprobación de aislamiento ---
+
+
+def test_default_network_is_still_none():
+    _, cmd = build_docker_command(CASE_DIR)
+
+    idx = cmd.index("--network")
+    assert cmd[idx + 1] == "none"
+
+
+def test_network_param_overrides_default_and_keeps_rest_of_protections():
+    _, cmd = build_docker_command(CASE_DIR, network="lynceus-net-abc123")
+
+    idx = cmd.index("--network")
+    assert cmd[idx + 1] == "lynceus-net-abc123"
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--memory" in cmd
+    assert "--cpus" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
+
+
+def test_network_create_command_is_internal():
+    cmd = build_network_create_cmd("lynceus-net-abc123")
+
+    assert cmd == ["docker", "network", "create", "--internal", "lynceus-net-abc123"]
+
+
+def test_network_rm_command_targets_the_right_network():
+    cmd = build_network_rm_cmd("lynceus-net-abc123")
+
+    assert cmd == ["docker", "network", "rm", "lynceus-net-abc123"]
+
+
+def test_receiver_command_never_publishes_ports():
+    name, cmd = build_receiver_command("lynceus-net-abc123")
+
+    assert "-p" not in cmd
+    assert "--publish" not in cmd
+    idx = cmd.index("--network")
+    assert cmd[idx + 1] == "lynceus-net-abc123"
+    idx = cmd.index("--name")
+    assert cmd[idx + 1] == name
+
+
+def test_receiver_command_keeps_the_same_hardening_as_the_server():
+    _, cmd = build_receiver_command("lynceus-net-abc123")
+
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
+
+
+def test_check_network_isolation_passes_when_output_is_exactly_isolation_ok(monkeypatch):
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="ISOLATION_OK\n", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    check_network_isolation("lynceus-net-abc123")  # no debe lanzar
+
+
+def test_check_network_isolation_aborts_if_tcp_reachable(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="ISOLATION_FAILED tcp_reachable=True dns_resolves=False\n", stderr="",
+    )
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    with pytest.raises(RunnerError, match="aislada"):
+        check_network_isolation("lynceus-net-abc123")
+
+
+def test_check_network_isolation_aborts_if_external_name_resolves(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="ISOLATION_FAILED tcp_reachable=False dns_resolves=True\n", stderr="",
+    )
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    with pytest.raises(RunnerError, match="aislada"):
+        check_network_isolation("lynceus-net-abc123")
+
+
+def test_check_network_isolation_aborts_on_ambiguous_output(monkeypatch):
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="algo inesperado\n", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    with pytest.raises(RunnerError, match="aislada"):
+        check_network_isolation("lynceus-net-abc123")
+
+
+def test_check_network_isolation_aborts_on_timeout(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    with pytest.raises(RunnerError, match="ambiguo"):
+        check_network_isolation("lynceus-net-abc123")
+
+
+def test_read_receiver_log_parses_json_lines_and_skips_garbage(monkeypatch):
+    stdout = (
+        '{"method": "GET", "path": "/tok-1", "host": "recv:8080"}\n'
+        "esto no es json\n"
+        '{"method": "GET", "path": "/tok-2", "host": "recv:8080"}\n'
+    )
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    entries = read_receiver_log("lynceus-receiver-abc123")
+
+    assert [e["path"] for e in entries] == ["/tok-1", "/tok-2"]

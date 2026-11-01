@@ -41,6 +41,10 @@ def _random_canary_content() -> str:
     return f"lynceus-secret-{uuid.uuid4().hex}"
 
 
+def _random_token() -> str:
+    return f"lynceus-ssrf-{uuid.uuid4().hex}"
+
+
 def build_payloads() -> list[Payload]:
     """Devuelve las cargas fijas, cada una con un canario nuevo y único."""
     payloads: list[Payload] = []
@@ -85,3 +89,34 @@ def build_path_traversal_payloads(depth: int = _TRAVERSAL_DEPTH) -> list[PathPay
             PathPayload(technique=technique, canary_path=canary_path, canary_content=canary_content, value=value)
         )
     return payloads
+
+
+@dataclass(frozen=True)
+class SsrfPayload:
+    technique: str
+    value: str
+    token: str | None = None
+    canary_path: str | None = None
+    canary_content: str | None = None
+
+
+def build_ssrf_payloads(receiver_name: str, receiver_ip: str) -> list[SsrfPayload]:
+    """Cargas fijas de SSRF: dos apuntan al receptor (por nombre y por IP),
+    cada una con su propio token aleatorio; la tercera es un canario de
+    lectura local, igual que en path traversal. Nada específico de un caso
+    concreto: `receiver_name`/`receiver_ip` son los únicos datos del entorno.
+    """
+    host_token = _random_token()
+    ip_token = _random_token()
+    canary_path = _random_canary_path()
+    canary_content = _random_canary_content()
+    return [
+        SsrfPayload(technique="host_url", value=f"http://{receiver_name}:8080/{host_token}", token=host_token),
+        SsrfPayload(technique="ip_url", value=f"http://{receiver_ip}:8080/{ip_token}", token=ip_token),
+        SsrfPayload(
+            technique="file_canary",
+            value=f"file://{canary_path}",
+            canary_path=canary_path,
+            canary_content=canary_content,
+        ),
+    ]

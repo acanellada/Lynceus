@@ -13,6 +13,12 @@ Dos modos:
   - Si lleva `canary_content` (path traversal): antes de arrancar el servidor
     se escribe `canary_content` en `canary_path`, y se confirma solo si ese
     contenido aparece en el texto de la respuesta (éxito o error).
+  - Si lleva `calls` (SSRF, intentos en dos pasos): en vez de una única
+    llamada a `tool`/`arguments`, ejecuta la lista de llamadas en orden
+    dentro de la misma sesión del mismo servidor, y agrega el resultado
+    (cualquier llamada con error marca el intento como erróneo; los textos
+    de todas las respuestas se concatenan). La confirmación por token del
+    receptor no la decide este harness: vive fuera, en ssrf.py.
 """
 
 import argparse
@@ -94,8 +100,9 @@ async def _list_tools(server_path: str) -> dict[str, Any]:
 
 
 async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, str]:
-    """Si procede, planta el canario de lectura; arranca un servidor nuevo,
-    hace una única llamada y lo cierra."""
+    """Si procede, planta el canario de lectura; arranca un servidor nuevo y
+    ejecuta una única llamada (`tool`/`arguments`) o, si el intento lleva
+    `calls`, la secuencia completa en la misma sesión, y lo cierra."""
     canary_content = attempt.get("canary_content")
     if canary_content is not None:
         Path(attempt["canary_path"]).write_text(canary_content)
@@ -103,8 +110,20 @@ async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, s
     params = StdioServerParameters(command=sys.executable, args=[server_path])
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
-        result = await session.call_tool(attempt["tool"], attempt["arguments"])
-    return result.isError, _content_text(result)
+        calls = attempt.get("calls")
+        if calls is None:
+            result = await session.call_tool(attempt["tool"], attempt["arguments"])
+            return result.isError, _content_text(result)
+
+        is_error = False
+        texts: list[str] = []
+        for call in calls:
+            result = await session.call_tool(call["tool"], call["arguments"])
+            is_error = is_error or result.isError
+            text = _content_text(result)
+            if text:
+                texts.append(text)
+        return is_error, " ".join(texts)
 
 
 async def _run_one_attempt(server_path: str, attempt: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -120,10 +139,16 @@ async def _run_one_attempt(server_path: str, attempt: dict[str, Any], timeout: f
         protocol_error = _describe(exc)
 
     canary_content = attempt.get("canary_content")
+    canary_path = attempt.get("canary_path")
     if canary_content is not None:
         canary_exists = canary_content in response_text
+    elif canary_path is not None:
+        canary_exists = Path(canary_path).exists()
     else:
-        canary_exists = Path(attempt["canary_path"]).exists()
+        # Sin canario propio (p.ej. las cargas de URL de SSRF): el harness no
+        # puede confirmar nada por sí mismo, la confirmación por token vive
+        # fuera, en ssrf.py, tras leer el registro del receptor.
+        canary_exists = False
 
     error_kind = "protocol" if protocol_error else ("tool" if tool_error else None)
     environment_markers = attempt.get("environment_markers", _ENV_ERROR_MARKERS)
