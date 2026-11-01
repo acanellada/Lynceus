@@ -94,6 +94,25 @@ Lectura: la validación dinámica confirma cmdi-02 (os.system en una función au
 
 Limitaciones: 8 casos (4 vulnerables), una sola clase, casos escritos por un agente. El canario lo comprueba el harness, dentro del mismo contenedor que el servidor: un servidor malicioso podría fingir un positivo. Los errores de entorno se detectan por texto. Un error de transporte puntual (BrokenResourceError) no se reintenta.
 
+## Validación dinámica: path traversal (30/10/2026, 8 casos)
+
+Mismo sandbox y mismo harness que en inyección de comandos. Canario de lectura: antes de cada intento se crea en /tmp un fichero con nombre y contenido aleatorios e independientes; el intento se confirma solo si el contenido aparece en la respuesta de la herramienta. Tres técnicas fijas: ruta absoluta, `../` repetido y la misma con prefijo `./`.
+
+| Método | TP | FP | FN | Precisión | Recall |
+|---|---|---|---|---|---|
+| Reglas de Semgrep | 3 | 1 | 1 | 0,75 | 0,75 |
+| Validación dinámica | 4 | 0 | 0 | 1,00 | 1,00 |
+
+Lectura: la validación dinámica confirma ptrav-02 (sumidero en una función auxiliar), que las reglas no veían, y deja limpio ptrav-03-fixed (lista de permitidos), que las reglas marcaban como falso positivo. ptrav-04-vulnerable solo se confirma con la ruta absoluta, porque su filtro bloquea `..`: la cobertura depende de tener varias técnicas.
+
+Limitaciones: 8 casos (4 vulnerables), escritos por un agente; la predicción previa se cumplió exactamente, lo que sugiere casos sencillos. En esta clase, FileNotFoundError cuenta como respuesta normal y solo ModuleNotFoundError y los fallos de infraestructura cuentan como inconclusos; otros errores de entorno (por ejemplo, PermissionError) se clasificarían como no confirmados. Mismo límite del oráculo: lo comprueba el harness dentro del contenedor.
+
+## Observación pendiente de verificar: procesos hijo y stdio
+
+En cmdi-02-vulnerable, el intento con `lynceus && touch <canario>` termina siempre en BrokenResourceError (no es transitorio). Hipótesis: el comando resultante ejecuta `grep lynceus` sin fichero, que lee de la entrada estándar; en un servidor MCP por stdio esa entrada es el canal del protocolo, así que grep consume los mensajes y rompe el transporte. Si se confirma, un proceso hijo que hereda la entrada estándar de un servidor MCP por stdio puede corromper el protocolo, lo que sería una vía de denegación de servicio.
+
+Rendimiento: la validación de inyección de comandos tarda unos 3,5 minutos en 8 casos (unos 2 segundos por intento, por arrancar un servidor nuevo en cada uno). Pendiente: paralelizar o reutilizar el contenedor, y matar el contenedor también ante una interrupción.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
