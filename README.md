@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <img src="https://github.com/acanellada/Lynceus/actions/workflows/ci.yml/badge.svg" alt="CI">
   <img src="https://img.shields.io/badge/licencia-Apache--2.0-f5a524" alt="Licencia Apache-2.0">
   <img src="https://img.shields.io/badge/python-3.12-f5a524" alt="Python 3.12">
   <img src="https://img.shields.io/badge/estado-en%20desarrollo-8f97a6" alt="Estado: en desarrollo">
