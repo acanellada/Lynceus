@@ -1,13 +1,13 @@
 from types import SimpleNamespace
 
+from rich.console import Console
+
 from lynceus_sec.cli_render import (
-    extract_parameter,
-    extract_payload,
-    extract_technique,
     is_plain_mode,
+    render_findings_table,
     sanitize_untrusted,
 )
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 
 
 def test_sanitize_strips_ansi_escape_sequences():
@@ -34,38 +34,6 @@ def test_sanitize_none_and_empty():
     assert sanitize_untrusted("") == ""
 
 
-def test_extract_parameter_from_message():
-    message = "Inyección de comandos confirmada en el parámetro 'cmd' de la tool 'run' (shell)"
-    assert extract_parameter(message) == "cmd"
-
-
-def test_extract_parameter_missing_returns_placeholder():
-    assert extract_parameter("mensaje sin parámetro") == "—"
-
-
-def test_extract_technique_strips_known_prefix():
-    finding = Finding(
-        case="x", rule_id="cmdi-shell_semicolon", vuln_class=VulnClass.COMMAND_INJECTION,
-        tool="run", severity="high", message="m", evidence=None, validated=True,
-    )
-    assert extract_technique(finding) == "shell_semicolon"
-
-
-def test_extract_payload_for_command_injection_evidence():
-    evidence = "payload='; touch /tmp/x' canary=/tmp/x"
-    assert extract_payload(evidence) == "'; touch /tmp/x'"
-
-
-def test_extract_payload_for_ssrf_evidence_with_detail():
-    evidence = "payload='http://169.254.169.254/' detail=token visto en el registro del receptor"
-    assert extract_payload(evidence) == "'http://169.254.169.254/'"
-
-
-def test_extract_payload_missing_returns_none():
-    assert extract_payload(None) is None
-    assert extract_payload("sin formato reconocido") is None
-
-
 def test_is_plain_mode_true_when_flag_set():
     stream = SimpleNamespace(isatty=lambda: True)
     assert is_plain_mode(plain_flag=True, stream=stream) is True
@@ -87,3 +55,58 @@ def test_is_plain_mode_false_when_interactive_and_no_flag_or_env(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     stream = SimpleNamespace(isatty=lambda: True)
     assert is_plain_mode(plain_flag=False, stream=stream) is False
+
+
+def _finding(**overrides) -> Finding:
+    defaults = {
+        "case": "case-1", "rule_id": "cmdi-shell_semicolon_bare", "vuln_class": VulnClass.COMMAND_INJECTION,
+        "tool": "git_log", "severity": "critical", "message": "m", "evidence": "Canario creado en /tmp/x",
+        "validated": True, "parameter": "ref", "technique": "shell_semicolon_bare", "payload": "; touch /tmp/x",
+        "reproduction": [ReproductionCall(tool="git_log", arguments={"ref": "; touch /tmp/x"})],
+    }
+    defaults.update(overrides)
+    return Finding(**defaults)
+
+
+def test_render_findings_table_plain_groups_and_uses_readable_names(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    f1 = _finding(technique="shell_semicolon_bare")
+    f2 = _finding(technique="shell_and_bare", rule_id="cmdi-shell_and_bare")
+
+    render_findings_table(console, [f1, f2], plain=True)
+    out = capsys.readouterr().out
+
+    assert "Inyección de comandos" in out
+    assert "Crítica" in out
+    assert "tool=git_log" in out
+    assert "shell_semicolon_bare" in out
+    assert "shell_and_bare" in out
+    assert "git_log(ref='; touch /tmp/x')" in out
+    # Una sola fila de vulnerabilidad, no una por técnica.
+    assert out.count("tool=git_log parametro=ref") == 1
+
+
+def test_render_findings_table_plain_shows_severity_note(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    render_findings_table(console, [_finding()], plain=True)
+    out = capsys.readouterr().out
+    assert "no es una puntuación CVSS" in out
+
+
+def test_render_findings_table_builds_reproduction_from_field_not_message(capsys):
+    """La reproducción viene de `Finding.reproduction`; un `message` sin
+    ningún formato reconocible no debe impedir que se muestre la llamada."""
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    finding = _finding(message="texto libre sin comillas ni formato especial")
+
+    render_findings_table(console, [finding], plain=True)
+    out = capsys.readouterr().out
+
+    assert "git_log(ref='; touch /tmp/x')" in out
+
+
+def test_render_findings_table_empty_prints_nothing(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    render_findings_table(console, [], plain=True)
+    out = capsys.readouterr().out
+    assert out == ""

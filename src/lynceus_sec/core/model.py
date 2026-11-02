@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +22,16 @@ class Label(BaseModel):
     parameter: str
 
 
+class ReproductionCall(BaseModel):
+    """Una llamada tal cual se ejecutó durante la validación: nombre de tool
+    y argumentos exactos, sin reconstruirla a partir de texto."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    arguments: dict[str, Any]
+
+
 class Finding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -32,3 +43,7 @@ class Finding(BaseModel):
     message: str
     evidence: str | None = None
     validated: bool = False
+    parameter: str | None = None
+    technique: str | None = None
+    payload: str | None = None
+    reproduction: list[ReproductionCall] | None = None

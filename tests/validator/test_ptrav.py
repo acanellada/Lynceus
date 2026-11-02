@@ -1,3 +1,4 @@
+from lynceus_sec.core.model import ReproductionCall
 from lynceus_sec.validator.payloads import build_path_traversal_payloads
 from lynceus_sec.validator.ptrav import attempts_to_findings, build_attempts
 
@@ -84,6 +85,19 @@ def test_only_confirmed_attempts_produce_findings():
     assert findings[0].tool == "read_doc"
     assert findings[0].vuln_class.value == "path_traversal"
     assert "lynceus-secret-abc" in findings[0].evidence
+
+    # Gravedad por clase: path traversal es alta (no es una puntuación CVSS).
+    assert findings[0].severity == "high"
+    assert findings[0].parameter == "name"
+    assert findings[0].technique == "dotdot_bare"
+    assert findings[0].payload == "../../../../../../../../tmp/x"
+    assert findings[0].evidence == "Contenido del canario leído en la respuesta: 'lynceus-secret-abc'"
+    assert findings[0].reproduction == [
+        ReproductionCall(
+            tool="read_doc",
+            arguments={"name": "../../../../../../../../tmp/x", "max_bytes": 0},
+        )
+    ]
 
     assert len(inconclusive) == 1
     assert inconclusive[0]["id"] == "id-3"

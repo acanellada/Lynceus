@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_payloads
 from lynceus_sec.validator.runner import DEFAULT_IMAGE, run_harness, run_validate
 
@@ -91,14 +91,18 @@ def attempts_to_findings(
                     rule_id=f"cmdi-{attempt['technique']}",
                     vuln_class=VulnClass.COMMAND_INJECTION,
                     tool=attempt["tool"],
-                    severity="high",
+                    severity="critical",
                     message=(
                         f"Inyección de comandos confirmada en el parámetro "
                         f"{attempt['parameter']!r} de la tool {attempt['tool']!r} "
                         f"({attempt['technique']})"
                     ),
-                    evidence=f"payload={attempt['payload']!r} canary={attempt['canary_path']}",
+                    evidence=f"Canario creado en {attempt['canary_path']}",
                     validated=True,
+                    parameter=attempt["parameter"],
+                    technique=attempt["technique"],
+                    payload=attempt["payload"],
+                    reproduction=[ReproductionCall(tool=attempt["tool"], arguments=attempt["arguments"])],
                 )
             )
         elif status == "inconclusive":

@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_path_traversal_payloads
 from lynceus_sec.validator.runner import DEFAULT_IMAGE, run_harness, run_validate
 
@@ -105,8 +105,12 @@ def attempts_to_findings(
                         f"{attempt['parameter']!r} de la tool {attempt['tool']!r} "
                         f"({attempt['technique']})"
                     ),
-                    evidence=f"payload={attempt['payload']!r} canary_content={attempt['canary_content']!r}",
+                    evidence=f"Contenido del canario leído en la respuesta: {attempt['canary_content']!r}",
                     validated=True,
+                    parameter=attempt["parameter"],
+                    technique=attempt["technique"],
+                    payload=attempt["payload"],
+                    reproduction=[ReproductionCall(tool=attempt["tool"], arguments=attempt["arguments"])],
                 )
             )
         elif status == "inconclusive":

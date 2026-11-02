@@ -1,3 +1,4 @@
+from lynceus_sec.core.model import ReproductionCall
 from lynceus_sec.validator.cmdi import attempts_to_findings, build_attempts
 from lynceus_sec.validator.payloads import build_payloads
 
@@ -80,6 +81,17 @@ def test_only_confirmed_attempts_produce_findings():
     assert findings[0].case == "cmdi-01-vulnerable"
     assert findings[0].tool == "git_log"
     assert findings[0].evidence is not None
+
+    # Gravedad por clase: inyección de comandos es crítica (no es una puntuación CVSS).
+    assert findings[0].severity == "critical"
+    # Campos estructurados, no interpretados de `message`/`evidence`.
+    assert findings[0].parameter == "ref"
+    assert findings[0].technique == "shell_semicolon_bare"
+    assert findings[0].payload == "; touch /tmp/x"
+    assert findings[0].evidence == "Canario creado en /tmp/x"
+    assert findings[0].reproduction == [
+        ReproductionCall(tool="git_log", arguments={"ref": "; touch /tmp/x", "depth": 0})
+    ]
 
     assert len(inconclusive) == 1
     assert inconclusive[0]["id"] == "id-3"

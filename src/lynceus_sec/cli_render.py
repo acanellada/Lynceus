@@ -32,7 +32,14 @@ from rich.table import Table
 from rich.text import Text
 
 from lynceus_sec.core.metrics import ClassMetrics
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding
+from lynceus_sec.report import (
+    CLASS_LABELS,
+    SEVERITY_LABELS,
+    SEVERITY_NOTE,
+    format_reproduction,
+    group_findings,
+)
 
 AMBER = "#b9770e"
 AMBER_BRIGHT = "#f0a500"
@@ -44,20 +51,6 @@ GREEN = "#2e7d32"
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-_])")
 _CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
-_RULE_PREFIX = {
-    VulnClass.COMMAND_INJECTION: "cmdi-",
-    VulnClass.PATH_TRAVERSAL: "ptrav-",
-    VulnClass.SSRF: "ssrf-",
-}
-_PARAM_RE = re.compile(r"parámetro '([^']*)'")
-_PAYLOAD_RE = re.compile(r"^payload=(.*?)\s(?:canary_content|canary|detail)=", re.DOTALL)
-
-CLASS_LABELS = {
-    "command_injection": "Inyección de comandos",
-    "path_traversal": "Path traversal",
-    "ssrf": "SSRF",
-}
-
 
 def sanitize_untrusted(text: str | None) -> str:
     """Quita secuencias de escape ANSI y caracteres de control de texto no confiable."""
@@ -66,32 +59,6 @@ def sanitize_untrusted(text: str | None) -> str:
     text = _ANSI_RE.sub("", text)
     text = _CONTROL_RE.sub(" ", text)
     return text
-
-
-def extract_parameter(message: str) -> str:
-    match = _PARAM_RE.search(message)
-    return match.group(1) if match else "—"
-
-
-def extract_technique(finding: Finding) -> str:
-    """El parámetro no es un campo de `Finding` (no se toca `core`): se deduce de `rule_id`."""
-    prefix = _RULE_PREFIX.get(finding.vuln_class, "")
-    if prefix and finding.rule_id.startswith(prefix):
-        return finding.rule_id[len(prefix):]
-    return finding.rule_id
-
-
-def extract_payload(evidence: str | None) -> str | None:
-    """El payload tampoco es un campo de `Finding`: se deduce de `evidence`.
-
-    Fiable porque, para las tres clases, lo que precede a `canary=`/
-    `canary_content=`/`detail=` en `evidence` es siempre el payload que
-    Lynceus generó (nunca texto del servidor analizado).
-    """
-    if not evidence:
-        return None
-    match = _PAYLOAD_RE.match(evidence)
-    return match.group(1) if match else None
 
 
 def is_plain_mode(*, plain_flag: bool, stream=None) -> bool:
@@ -185,41 +152,55 @@ def run_with_progress(
     return result
 
 
-def _severity_style(status: str) -> str:
-    return {"confirmed": f"bold {RED}", "inconclusive": f"bold {YELLOW}", "none": f"bold {GREEN}"}[status]
-
-
 def render_findings_table(console: Console, findings: list[Finding], *, plain: bool) -> None:
-    if not findings:
+    groups = group_findings(findings)
+    if not groups:
         return
     if plain:
-        console.print("Hallazgos confirmados:")
-        for finding in findings:
+        console.print("Vulnerabilidades confirmadas:")
+        console.print(f"  ({SEVERITY_NOTE})")
+        for group in groups:
+            class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
+            severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
             console.print(
-                f"  - severidad={finding.severity} tool={sanitize_untrusted(finding.tool)} "
-                f"parametro={sanitize_untrusted(extract_parameter(finding.message))} "
-                f"clase={finding.vuln_class.value} tecnica={extract_technique(finding)} "
-                f"evidencia={sanitize_untrusted(finding.evidence)}"
+                f"  - tool={sanitize_untrusted(group.tool)} parametro={sanitize_untrusted(group.parameter)} "
+                f"clase={class_label} gravedad={severity_label}"
             )
+            for finding in group.findings:
+                technique = finding.technique or finding.rule_id
+                call = format_reproduction(finding.reproduction)
+                console.print(
+                    f"      tecnica={sanitize_untrusted(technique)} "
+                    f"reproduccion={sanitize_untrusted(call)} "
+                    f"evidencia={sanitize_untrusted(finding.evidence)}"
+                )
         return
 
-    title = Text("🔍 Hallazgos confirmados", style=f"bold {AMBER_BRIGHT}")
-    table = Table(title=title, border_style=AMBER, header_style=f"bold {GOLD}")
+    title = Text("🔍 Vulnerabilidades confirmadas", style=f"bold {AMBER_BRIGHT}")
+    table = Table(title=title, caption=SEVERITY_NOTE, border_style=AMBER, header_style=f"bold {GOLD}")
     table.add_column("Gravedad")
     table.add_column("Herramienta")
     table.add_column("Parámetro")
     table.add_column("Clase")
-    table.add_column("Técnica")
-    table.add_column("Evidencia", overflow="fold")
+    table.add_column("Técnicas / reproducción / evidencia", overflow="fold")
 
-    for finding in findings:
+    for group in groups:
+        class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
+        severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
+        detail_lines = []
+        for finding in group.findings:
+            technique = finding.technique or finding.rule_id
+            call = format_reproduction(finding.reproduction)
+            detail_lines.append(
+                f"{sanitize_untrusted(technique)} → {sanitize_untrusted(call)}\n"
+                f"  {sanitize_untrusted(finding.evidence)}"
+            )
         table.add_row(
-            Text(finding.severity, style=_severity_style("confirmed")),
-            Text(sanitize_untrusted(finding.tool)),
-            Text(sanitize_untrusted(extract_parameter(finding.message))),
-            Text(finding.vuln_class.value),
-            Text(extract_technique(finding)),
-            Text(sanitize_untrusted(finding.evidence)),
+            Text(severity_label, style=f"bold {RED}"),
+            Text(sanitize_untrusted(group.tool)),
+            Text(sanitize_untrusted(group.parameter)),
+            Text(class_label),
+            Text("\n".join(detail_lines)),
         )
     console.print(table)
 
@@ -231,9 +212,10 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
     if plain:
         console.print("Intentos inconclusos:")
         for class_name, items in inconclusive_by_class.items():
+            class_label = CLASS_LABELS.get(class_name, class_name)
             for item in items:
                 console.print(
-                    f"  - clase={class_name} tool={sanitize_untrusted(item.get('tool'))} "
+                    f"  - clase={class_label} tool={sanitize_untrusted(item.get('tool'))} "
                     f"parametro={sanitize_untrusted(item.get('parameter'))} "
                     f"tecnica={sanitize_untrusted(item.get('technique'))} "
                     f"detalle={sanitize_untrusted(str(item.get('detail') or item.get('status')))}"
@@ -248,9 +230,10 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
     table.add_column("Técnica")
     table.add_column("Detalle", overflow="fold")
     for class_name, items in inconclusive_by_class.items():
+        class_label = CLASS_LABELS.get(class_name, class_name)
         for item in items:
             table.add_row(
-                Text(class_name),
+                Text(class_label),
                 Text(sanitize_untrusted(str(item.get("tool")))),
                 Text(sanitize_untrusted(str(item.get("parameter")))),
                 Text(sanitize_untrusted(str(item.get("technique")))),
@@ -261,31 +244,32 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
 
 @dataclass
 class ScanSummary:
-    confirmed: int
+    vulnerabilities: int
+    techniques: int
     inconclusive: int
     elapsed_seconds: float
 
 
 def render_summary(console: Console, summary: ScanSummary, *, plain: bool) -> None:
+    vuln_text = f"{summary.vulnerabilities} vulnerabilidades confirmadas ({summary.techniques} técnicas)"
     if plain:
-        status = "FAIL" if summary.confirmed else ("WARN" if summary.inconclusive else "OK")
+        status = "FAIL" if summary.vulnerabilities else ("WARN" if summary.inconclusive else "OK")
         console.print(
-            f"[{status}] confirmados={summary.confirmed} inconclusos={summary.inconclusive} "
+            f"[{status}] {vuln_text}, inconclusos={summary.inconclusive} "
             f"tiempo={summary.elapsed_seconds:.1f}s"
         )
         return
 
-    if summary.confirmed:
-        icon, style, verdict = "❌", RED, "hallazgos confirmados"
+    if summary.vulnerabilities:
+        icon, style = "❌", RED
     elif summary.inconclusive:
-        icon, style, verdict = "⚠️ ", YELLOW, "resultado inconcluso"
+        icon, style = "⚠️ ", YELLOW
     else:
-        icon, style, verdict = "✅", GREEN, "sin hallazgos"
+        icon, style = "✅", GREEN
 
     text = Text()
     text.append(f"{icon} ", style=f"bold {style}")
-    text.append(f"{verdict}: ", style=f"bold {style}")
-    text.append(f"{summary.confirmed} confirmados, ", style=style)
+    text.append(f"{vuln_text}, ", style=f"bold {style}")
     text.append(f"{summary.inconclusive} inconclusos, ", style=style)
     text.append(f"{summary.elapsed_seconds:.1f}s totales", style=style)
     console.print(Panel(text, border_style=style, padding=(0, 2)))

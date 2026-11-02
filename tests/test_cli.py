@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from lynceus_sec.cli import app
 from lynceus_sec.core.metrics import compute_metrics
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.bench import CLASS_CONFIG, BenchResult
 
 runner = CliRunner()
@@ -28,9 +28,11 @@ def case_dir(tmp_path):
 def _finding(tool="git_log", parameter="ref", technique="shell_semicolon_bare"):
     return Finding(
         case="x", rule_id=f"cmdi-{technique}", vuln_class=VulnClass.COMMAND_INJECTION, tool=tool,
-        severity="high",
+        severity="critical",
         message=f"Inyección de comandos confirmada en el parámetro '{parameter}' de la tool '{tool}' ({technique})",
-        evidence="payload='; id' canary=/tmp/x", validated=True,
+        evidence="Canario creado en /tmp/x", validated=True,
+        parameter=parameter, technique=technique, payload="; id",
+        reproduction=[ReproductionCall(tool=tool, arguments={parameter: "; id"})],
     )
 
 
@@ -130,16 +132,64 @@ def test_scan_json_report_structure(case_dir, tmp_path):
     assert result.exit_code == 1
     payload = json.loads(json_path.read_text())
 
+    assert payload["schema_version"] == 1
     assert payload["target"] == str(case_dir)
     assert payload["classes"] == ["command_injection"]
-    assert payload["summary"]["confirmed"] == 1
+    assert payload["summary"]["vulnerabilities_confirmed"] == 1
+    assert payload["summary"]["techniques_confirmed"] == 1
     assert payload["summary"]["inconclusive"] == 0
     assert isinstance(payload["summary"]["elapsed_seconds"], float)
-    assert len(payload["findings"]) == 1
-    assert payload["findings"][0]["tool"] == "git_log"
-    assert payload["findings"][0]["vuln_class"] == "command_injection"
+    assert len(payload["vulnerabilities"]) == 1
+    vuln = payload["vulnerabilities"][0]
+    assert vuln["tool"] == "git_log"
+    assert vuln["parameter"] == "ref"
+    assert vuln["vuln_class"] == "command_injection"
+    assert vuln["severity"] == "critical"
+    assert vuln["techniques"] == ["shell_semicolon_bare"]
+    assert len(vuln["confirmations"]) == 1
+    confirmation = vuln["confirmations"][0]
+    assert confirmation["technique"] == "shell_semicolon_bare"
+    assert confirmation["payload"] == "; id"
+    assert confirmation["evidence"] == "Canario creado en /tmp/x"
+    assert confirmation["reproduction"] == [{"tool": "git_log", "arguments": {"ref": "; id"}}]
     assert "environment" in payload
     assert payload["environment"]["lynceus_version"]
+
+
+def test_scan_json_groups_multiple_techniques_into_one_vulnerability(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    f1 = _finding(technique="shell_semicolon_bare")
+    f2 = _finding(technique="shell_and_bare")
+    with _patched_validators(cmdi_result=([f1, f2], [])):
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--plain", "--classes", "command_injection", "--json", str(json_path)],
+        )
+    assert result.exit_code == 1
+    payload = json.loads(json_path.read_text())
+
+    assert payload["summary"]["vulnerabilities_confirmed"] == 1
+    assert payload["summary"]["techniques_confirmed"] == 2
+    assert len(payload["vulnerabilities"]) == 1
+    assert payload["vulnerabilities"][0]["techniques"] == ["shell_semicolon_bare", "shell_and_bare"]
+    assert len(payload["vulnerabilities"][0]["confirmations"]) == 2
+
+
+def test_scan_json_malicious_tool_name_does_not_merge_attribution(case_dir, tmp_path):
+    """Un nombre de tool diseñado para parecer el de otra herramienta no debe
+    fusionarse con ella: la agrupación usa `tool` tal cual, no interpretado."""
+    json_path = tmp_path / "out.json"
+    legit = _finding(tool="read_file", parameter="path")
+    spoofed = _finding(tool="read_file' de la tool 'other_tool", parameter="path")
+    with _patched_validators(cmdi_result=([legit, spoofed], [])):
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--plain", "--classes", "command_injection", "--json", str(json_path)],
+        )
+    assert result.exit_code == 1
+    payload = json.loads(json_path.read_text())
+
+    assert len(payload["vulnerabilities"]) == 2
+    tools = {v["tool"] for v in payload["vulnerabilities"]}
+    assert tools == {"read_file", "read_file' de la tool 'other_tool"}
 
 
 def test_scan_html_report_is_written(case_dir, tmp_path):

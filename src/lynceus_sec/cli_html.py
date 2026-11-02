@@ -16,13 +16,15 @@ import html
 from datetime import UTC, datetime
 
 from lynceus_sec.cli_env import EnvironmentInfo
-from lynceus_sec.cli_render import (
-    CLASS_LABELS,
-    extract_parameter,
-    extract_payload,
-    extract_technique,
-)
 from lynceus_sec.core.model import Finding
+from lynceus_sec.report import (
+    CLASS_LABELS,
+    SEVERITY_LABELS,
+    SEVERITY_NOTE,
+    FindingGroup,
+    format_reproduction,
+    group_findings,
+)
 
 _CSP = "default-src 'none'; style-src 'unsafe-inline'"
 
@@ -105,6 +107,9 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .env dt { color: var(--fg-muted); float: left; width: 14rem; clear: left; }
 .env dd { margin: 0 0 0.3rem 14rem; }
 .muted { color: var(--fg-muted); font-size: 0.9em; }
+.confirmations { list-style: none; margin: 0; padding: 0; }
+.confirmations li { margin-bottom: 0.5rem; }
+.confirmations li:last-child { margin-bottom: 0; }
 """
 
 
@@ -117,28 +122,31 @@ def _badge(status: str) -> str:
     return f'<span class="badge {css}">{html.escape(label)}</span>'
 
 
-def _reproduction_call(finding: Finding) -> str:
-    tool = html.escape(finding.tool)
-    parameter = html.escape(extract_parameter(finding.message))
-    payload = extract_payload(finding.evidence)
-    payload_repr = html.escape(payload) if payload is not None else "(no disponible)"
-    return f"{tool}({parameter}={payload_repr})"
+def _confirmations_list(group: FindingGroup) -> str:
+    items = []
+    for finding in group.findings:
+        technique = html.escape(finding.technique or finding.rule_id)
+        call = html.escape(format_reproduction(finding.reproduction))
+        evidence = html.escape(finding.evidence or "")
+        items.append(f"<li><strong>{technique}</strong> &rarr; <span class=\"mono\">{call}</span><br>{evidence}</li>")
+    return f'<ul class="confirmations">{"".join(items)}</ul>'
 
 
 def _findings_rows(findings: list[Finding]) -> str:
-    if not findings:
-        return '<tr><td colspan="7" class="muted">Sin hallazgos confirmados.</td></tr>'
+    groups = group_findings(findings)
+    if not groups:
+        return '<tr><td colspan="5" class="muted">Sin hallazgos confirmados.</td></tr>'
     rows = []
-    for finding in findings:
+    for group in groups:
+        severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
+        class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
         rows.append(
             "<tr>"
-            f"<td>{_badge('confirmed')}</td>"
-            f"<td class=\"mono\">{html.escape(finding.tool)}</td>"
-            f"<td class=\"mono\">{html.escape(extract_parameter(finding.message))}</td>"
-            f"<td>{html.escape(finding.vuln_class.value)}</td>"
-            f"<td>{html.escape(extract_technique(finding))}</td>"
-            f"<td class=\"mono\">{_reproduction_call(finding)}</td>"
-            f"<td>{html.escape(finding.evidence or '')}</td>"
+            f"<td>{html.escape(severity_label)}</td>"
+            f"<td class=\"mono\">{html.escape(group.tool)}</td>"
+            f"<td class=\"mono\">{html.escape(group.parameter or '')}</td>"
+            f"<td>{html.escape(class_label)}</td>"
+            f"<td>{_confirmations_list(group)}</td>"
             "</tr>"
         )
     return "".join(rows)
@@ -190,9 +198,10 @@ def build_html_report(
     elapsed_seconds: float,
     environment: EnvironmentInfo,
 ) -> str:
-    confirmed = len(findings)
+    vulnerabilities_confirmed = len(group_findings(findings))
+    techniques_confirmed = len(findings)
     inconclusive_count = sum(len(items) for items in inconclusive_by_class.values())
-    status = "confirmed" if confirmed else ("inconclusive" if inconclusive_count else "none")
+    status = "confirmed" if vulnerabilities_confirmed else ("inconclusive" if inconclusive_count else "none")
     generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     return f"""<!doctype html>
@@ -214,17 +223,19 @@ def build_html_report(
   <section class="summary">
     <p>{_badge(status)} &nbsp; objetivo: <span class="mono">{html.escape(target)}</span></p>
     <p>Clases analizadas: {html.escape(", ".join(CLASS_LABELS.get(c, c) for c in classes))}</p>
-    <p>Confirmados: <strong>{confirmed}</strong> &middot; Inconclusos: <strong>{inconclusive_count}</strong>
+    <p>{vulnerabilities_confirmed} vulnerabilidades confirmadas ({techniques_confirmed} técnicas)
+       &middot; Inconclusos: <strong>{inconclusive_count}</strong>
        &middot; Tiempo total: <strong>{elapsed_seconds:.1f}s</strong></p>
     <p class="muted">Generado el {html.escape(generated_at)}.</p>
   </section>
 
   <section>
-    <h2>🔍 Hallazgos</h2>
+    <h2>🔍 Vulnerabilidades</h2>
+    <p class="muted">{html.escape(SEVERITY_NOTE)}</p>
     <table>
       <thead><tr>
         <th>Gravedad</th><th>Herramienta</th><th>Parámetro</th><th>Clase</th>
-        <th>Técnica</th><th>Llamada de reproducción</th><th>Evidencia</th>
+        <th>Técnicas confirmadas (reproducción y evidencia)</th>
       </tr></thead>
       <tbody>{_findings_rows(findings)}</tbody>
     </table>

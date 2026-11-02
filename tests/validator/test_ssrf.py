@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from lynceus_sec.core.model import ReproductionCall
 from lynceus_sec.validator import ssrf
 from lynceus_sec.validator.runner import RunnerError
 from lynceus_sec.validator.ssrf import (
@@ -156,7 +157,7 @@ def test_secondary_arguments_use_own_neutral_value_when_param_absent_from_primar
 # --- attempts_to_findings: el token del receptor manda sobre el harness ---
 
 
-def _url_attempt(attempt_id="a1", token="tok-1", technique="host_url"):
+def _url_attempt(attempt_id="a1", token="tok-1", technique="host_url", calls=None):
     return {
         "id": attempt_id,
         "tool": "fetch",
@@ -166,6 +167,7 @@ def _url_attempt(attempt_id="a1", token="tok-1", technique="host_url"):
         "token": token,
         "canary_path": None,
         "canary_content": None,
+        "calls": calls if calls is not None else [{"tool": "fetch", "arguments": {"url": f"http://recv-name:8080/{token}"}}],
     }
 
 
@@ -179,6 +181,7 @@ def _file_attempt(attempt_id="a2"):
         "token": None,
         "canary_path": "/tmp/lynceus-canary-x",
         "canary_content": "lynceus-secret-x",
+        "calls": [{"tool": "fetch", "arguments": {"url": "file:///tmp/lynceus-canary-x"}}],
     }
 
 
@@ -193,7 +196,52 @@ def test_token_seen_in_receiver_log_confirms_even_if_the_harness_says_not_confir
     assert findings[0].validated is True
     assert findings[0].vuln_class.value == "ssrf"
     assert findings[0].tool == "fetch"
+    assert findings[0].severity == "high"
+    assert findings[0].parameter == "url"
+    assert findings[0].technique == "host_url"
+    assert findings[0].payload == "http://recv-name:8080/tok-1"
     assert inconclusive == []
+
+
+def test_token_confirmation_evidence_includes_method_and_path():
+    attempt = _url_attempt()
+    log_entries = [{"method": "GET", "path": "/tok-1", "host": "recv-name:8080"}]
+
+    findings, _inconclusive = attempts_to_findings("ssrf-01-vulnerable", [attempt], [], log_entries)
+
+    assert findings[0].evidence == "Petición GET /tok-1 recibida por el receptor"
+
+
+def test_token_confirmation_evidence_carries_a_malicious_path_unescaped():
+    """La ruta la decide el servidor analizado: se guarda tal cual en `evidence`
+    (es texto no confiable); el escape para HTML/terminal ocurre al renderizar,
+    no aquí."""
+    malicious_path = "/tok-1<script>alert(1)</script>\x1b[31m"
+    attempt = _url_attempt()
+    log_entries = [{"method": "GET", "path": malicious_path, "host": "recv-name:8080"}]
+
+    findings, _inconclusive = attempts_to_findings("ssrf-01-vulnerable", [attempt], [], log_entries)
+
+    assert findings[0].evidence == f"Petición GET {malicious_path} recibida por el receptor"
+
+
+def test_two_step_attempt_reproduction_carries_every_call_not_just_the_first():
+    calls = [
+        {"tool": "fetch", "arguments": {"url": "http://recv-name:8080/tok-1"}},
+        {"tool": "process", "arguments": {"url": "http://recv-name:8080/tok-1", "flag": False}},
+    ]
+    attempt = _url_attempt(calls=calls)
+    log_entries = [{"method": "GET", "path": "/tok-1", "host": "recv-name:8080"}]
+
+    findings, _inconclusive = attempts_to_findings("ssrf-01-vulnerable", [attempt], [], log_entries)
+
+    reproduction = findings[0].reproduction
+    assert reproduction is not None
+    assert len(reproduction) == 2
+    assert reproduction[0].tool == "fetch"
+    assert reproduction[0].arguments == {"url": "http://recv-name:8080/tok-1"}
+    assert reproduction[1].tool == "process"
+    assert reproduction[1].arguments == {"url": "http://recv-name:8080/tok-1", "flag": False}
 
 
 def test_token_seen_in_receiver_log_confirms_even_without_a_harness_result():
@@ -234,6 +282,12 @@ def test_file_canary_confirmation_trusts_the_harness_directly():
 
     assert len(findings) == 1
     assert "lynceus-secret-x" in findings[0].evidence
+    assert findings[0].evidence == "Contenido del canario leído en la respuesta: 'lynceus-secret-x'"
+    assert findings[0].technique == "file_canary"
+    assert findings[0].payload == "file:///tmp/lynceus-canary-x"
+    assert findings[0].reproduction == [
+        ReproductionCall(tool="fetch", arguments={"url": "file:///tmp/lynceus-canary-x"})
+    ]
 
 
 # --- validate_case: limpieza garantizada (red, receptor, servidor) ---

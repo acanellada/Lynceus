@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from lynceus_sec.core.model import Finding, VulnClass
+from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_ssrf_payloads
 from lynceus_sec.validator.ptrav import _base_arguments, _neutral_value, _string_params
 from lynceus_sec.validator.runner import (
@@ -91,8 +91,11 @@ def build_attempts(tools: list[dict[str, Any]], receiver_name: str, receiver_ip:
     return attempts
 
 
-def _token_seen(token: str, log_entries: list[dict[str, Any]]) -> bool:
-    return any(token in str(entry.get("path", "")) for entry in log_entries)
+def _matching_log_entry(token: str, log_entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for entry in log_entries:
+        if token in str(entry.get("path", "")):
+            return entry
+    return None
 
 
 def attempts_to_findings(
@@ -105,7 +108,9 @@ def attempts_to_findings(
 
     Un token visto en el registro del receptor confirma el intento sin
     importar lo que haya devuelto el harness (el oráculo manda sobre
-    cualquier error de herramienta posterior a la petición real).
+    cualquier error de herramienta posterior a la petición real). La
+    evidencia de esa confirmación (método y ruta recibidos) la decide el
+    servidor analizado: es texto no confiable, igual que `tool`/`parameter`.
     """
     log_entries = log_entries or []
     results_by_id = {result["id"]: result for result in results}
@@ -116,10 +121,17 @@ def attempts_to_findings(
         result = results_by_id.get(attempt["id"])
         status = result["status"] if result is not None else "inconclusive"
         detail = result.get("detail") if result is not None else "sin resultado del harness"
+        evidence = None
 
         token = attempt.get("token")
-        if token and _token_seen(token, log_entries):
+        matched_entry = _matching_log_entry(token, log_entries) if token else None
+        if matched_entry is not None:
             status, detail = "confirmed", "token visto en el registro del receptor"
+            method = str(matched_entry.get("method", "?"))
+            path = str(matched_entry.get("path", "?"))
+            evidence = f"Petición {method} {path} recibida por el receptor"
+        elif status == "confirmed":
+            evidence = f"Contenido del canario leído en la respuesta: {attempt['canary_content']!r}"
 
         if status == "confirmed":
             findings.append(
@@ -133,8 +145,12 @@ def attempts_to_findings(
                         f"SSRF confirmado en el parámetro {attempt['parameter']!r} "
                         f"de la tool {attempt['tool']!r} ({attempt['technique']})"
                     ),
-                    evidence=f"payload={attempt['payload']!r} detail={detail}",
+                    evidence=evidence,
                     validated=True,
+                    parameter=attempt["parameter"],
+                    technique=attempt["technique"],
+                    payload=attempt["payload"],
+                    reproduction=[ReproductionCall(tool=c["tool"], arguments=c["arguments"]) for c in attempt["calls"]],
                 )
             )
         elif status == "inconclusive":

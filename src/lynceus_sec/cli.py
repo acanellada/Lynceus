@@ -17,7 +17,6 @@ import typer
 from lynceus_sec.cli_env import collect_environment_info
 from lynceus_sec.cli_html import build_html_report
 from lynceus_sec.cli_render import (
-    CLASS_LABELS,
     ScanSummary,
     is_plain_mode,
     make_console,
@@ -32,6 +31,7 @@ from lynceus_sec.cli_render import (
 )
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, Label
+from lynceus_sec.report import CLASS_LABELS, group_findings
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
@@ -80,26 +80,37 @@ def _build_json_payload(
     elapsed_seconds: float,
     environment,
 ) -> dict:
+    groups = group_findings(findings)
     return {
+        "schema_version": 1,
         "target": target,
         "classes": classes,
         "summary": {
-            "confirmed": len(findings),
+            "vulnerabilities_confirmed": len(groups),
+            "techniques_confirmed": len(findings),
             "inconclusive": sum(len(v) for v in inconclusive_by_class.values()),
             "elapsed_seconds": elapsed_seconds,
         },
-        "findings": [
+        "vulnerabilities": [
             {
-                "case": f.case,
-                "rule_id": f.rule_id,
-                "vuln_class": f.vuln_class.value,
-                "tool": f.tool,
-                "severity": f.severity,
-                "message": f.message,
-                "evidence": f.evidence,
-                "validated": f.validated,
+                "case": g.case,
+                "tool": g.tool,
+                "parameter": g.parameter,
+                "vuln_class": g.vuln_class.value,
+                "severity": g.severity,
+                "techniques": g.techniques,
+                "confirmations": [
+                    {
+                        "technique": f.technique,
+                        "rule_id": f.rule_id,
+                        "payload": f.payload,
+                        "evidence": f.evidence,
+                        "reproduction": [call.model_dump() for call in (f.reproduction or [])],
+                    }
+                    for f in g.findings
+                ],
             }
-            for f in findings
+            for g in groups
         ],
         "inconclusive": inconclusive_by_class,
         "environment": {
@@ -171,7 +182,8 @@ def scan(
     render_inconclusive(console, inconclusive_by_class, plain=plain_mode)
 
     summary = ScanSummary(
-        confirmed=len(all_findings),
+        vulnerabilities=len(group_findings(all_findings)),
+        techniques=len(all_findings),
         inconclusive=sum(len(v) for v in inconclusive_by_class.values()),
         elapsed_seconds=elapsed,
     )
