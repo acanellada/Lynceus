@@ -2,7 +2,15 @@
 name = "lynceus-sec"
 version = "0.0.1"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2", "pyyaml"]
+dependencies = [
+    "pydantic>=2",
+    "pyyaml",
+    "rich>=15.0.0",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+lynceus = "lynceus_sec.cli:app"
 
 [dependency-groups]
 dev = [
