@@ -2,6 +2,9 @@ from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.report import (
     CLASS_LABELS,
     SEVERITY_LABELS,
+    SSRF_RECEIVER_NOTE,
+    count_phrase,
+    format_calls,
     format_reproduction,
     group_findings,
 )
@@ -100,3 +103,35 @@ def test_class_and_severity_labels_cover_every_known_identifier():
     assert CLASS_LABELS["ssrf"] == "SSRF"
     assert SEVERITY_LABELS["critical"] == "Crítica"
     assert SEVERITY_LABELS["high"] == "Alta"
+
+
+def test_count_phrase_uses_singular_for_one():
+    assert count_phrase(1, "vulnerabilidad confirmada", "vulnerabilidades confirmadas") == (
+        "1 vulnerabilidad confirmada"
+    )
+
+
+def test_count_phrase_uses_plural_for_zero_and_many():
+    assert count_phrase(0, "inconcluso", "inconclusos") == "0 inconclusos"
+    assert count_phrase(2, "inconcluso", "inconclusos") == "2 inconclusos"
+
+
+def test_format_calls_returns_one_string_per_call():
+    calls = [
+        ReproductionCall(tool="fetch", arguments={"url": "http://recv:8080/tok"}),
+        ReproductionCall(tool="process", arguments={"url": "http://recv:8080/tok", "flag": False}),
+    ]
+    assert format_calls(calls) == [
+        "fetch(url='http://recv:8080/tok')",
+        "process(url='http://recv:8080/tok', flag=False)",
+    ]
+
+
+def test_format_calls_handles_missing_calls():
+    assert format_calls(None) == ["(no disponible)"]
+    assert format_calls([]) == ["(no disponible)"]
+
+
+def test_ssrf_receiver_note_mentions_temporary_setup_and_reproduction():
+    assert "temporal" in SSRF_RECEIVER_NOTE
+    assert "receptor propio" in SSRF_RECEIVER_NOTE

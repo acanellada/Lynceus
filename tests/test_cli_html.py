@@ -1,6 +1,9 @@
+import html
+
 from lynceus_sec.cli_env import EnvironmentInfo
 from lynceus_sec.cli_html import build_html_report
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
+from lynceus_sec.report import SSRF_RECEIVER_NOTE
 
 ENV = EnvironmentInfo(
     lynceus_version="0.0.1",
@@ -142,3 +145,41 @@ def test_html_report_reproduction_call_comes_from_reproduction_field():
         inconclusive_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "git_log(ref=&#x27;; id&#x27;)" in html_out
+
+
+def test_html_report_shows_ssrf_note_only_for_ssrf_findings():
+    cmdi_finding = _finding()
+    ssrf_finding = _finding(
+        vuln_class=VulnClass.SSRF, rule_id="ssrf-host_url", technique="host_url",
+        tool="fetch", parameter="url",
+        reproduction=[ReproductionCall(tool="fetch", arguments={"url": "http://recv:8080/tok"})],
+    )
+
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection", "ssrf"], findings=[cmdi_finding, ssrf_finding],
+        inconclusive_by_class={}, elapsed_seconds=1.0, environment=ENV,
+    )
+
+    assert html_out.count(html.escape(SSRF_RECEIVER_NOTE)) == 1
+
+
+def test_html_report_summary_uses_singular_for_one_vulnerability():
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection"], findings=[_finding()],
+        inconclusive_by_class={}, elapsed_seconds=1.0, environment=ENV,
+    )
+    assert "1 vulnerabilidad confirmada (1 técnica)" in html_out
+
+
+def test_html_report_summary_uses_plural_for_many():
+    f1 = _finding(technique="shell_semicolon_bare")
+    f2 = _finding(tool="git_diff", technique="shell_and_bare", rule_id="cmdi-shell_and_bare")
+    inconclusive = {"ssrf": [{"tool": "x", "parameter": "y", "technique": "z", "detail": "d"}]}
+
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection"], findings=[f1, f2],
+        inconclusive_by_class=inconclusive, elapsed_seconds=1.0, environment=ENV,
+    )
+
+    assert "2 vulnerabilidades confirmadas (2 técnicas)" in html_out
+    assert "1 intento inconcluso" in html_out

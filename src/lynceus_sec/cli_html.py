@@ -16,12 +16,14 @@ import html
 from datetime import UTC, datetime
 
 from lynceus_sec.cli_env import EnvironmentInfo
-from lynceus_sec.core.model import Finding
+from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
     CLASS_LABELS,
     SEVERITY_LABELS,
     SEVERITY_NOTE,
+    SSRF_RECEIVER_NOTE,
     FindingGroup,
+    count_phrase,
     format_reproduction,
     group_findings,
 )
@@ -129,7 +131,10 @@ def _confirmations_list(group: FindingGroup) -> str:
         call = html.escape(format_reproduction(finding.reproduction))
         evidence = html.escape(finding.evidence or "")
         items.append(f"<li><strong>{technique}</strong> &rarr; <span class=\"mono\">{call}</span><br>{evidence}</li>")
-    return f'<ul class="confirmations">{"".join(items)}</ul>'
+    list_html = f'<ul class="confirmations">{"".join(items)}</ul>'
+    if group.vuln_class == VulnClass.SSRF:
+        list_html += f'<p class="muted">{html.escape(SSRF_RECEIVER_NOTE)}</p>'
+    return list_html
 
 
 def _findings_rows(findings: list[Finding]) -> str:
@@ -204,6 +209,10 @@ def build_html_report(
     status = "confirmed" if vulnerabilities_confirmed else ("inconclusive" if inconclusive_count else "none")
     generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    vuln_phrase = count_phrase(vulnerabilities_confirmed, "vulnerabilidad confirmada", "vulnerabilidades confirmadas")
+    techniques_phrase = count_phrase(techniques_confirmed, "técnica", "técnicas")
+    inconclusive_phrase = count_phrase(inconclusive_count, "intento inconcluso", "intentos inconclusos")
+
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -223,8 +232,8 @@ def build_html_report(
   <section class="summary">
     <p>{_badge(status)} &nbsp; objetivo: <span class="mono">{html.escape(target)}</span></p>
     <p>Clases analizadas: {html.escape(", ".join(CLASS_LABELS.get(c, c) for c in classes))}</p>
-    <p>{vulnerabilities_confirmed} vulnerabilidades confirmadas ({techniques_confirmed} técnicas)
-       &middot; Inconclusos: <strong>{inconclusive_count}</strong>
+    <p>{vuln_phrase} ({techniques_phrase})
+       &middot; {inconclusive_phrase}
        &middot; Tiempo total: <strong>{elapsed_seconds:.1f}s</strong></p>
     <p class="muted">Generado el {html.escape(generated_at)}.</p>
   </section>

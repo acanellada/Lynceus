@@ -32,12 +32,15 @@ from rich.table import Table
 from rich.text import Text
 
 from lynceus_sec.core.metrics import ClassMetrics
-from lynceus_sec.core.model import Finding
+from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
     CLASS_LABELS,
     SEVERITY_LABELS,
     SEVERITY_NOTE,
-    format_reproduction,
+    SSRF_RECEIVER_NOTE,
+    FindingGroup,
+    count_phrase,
+    format_calls,
     group_findings,
 )
 
@@ -152,57 +155,106 @@ def run_with_progress(
     return result
 
 
-def render_findings_table(console: Console, findings: list[Finding], *, plain: bool) -> None:
-    groups = group_findings(findings)
-    if not groups:
-        return
-    if plain:
-        console.print("Vulnerabilidades confirmadas:")
-        console.print(f"  ({SEVERITY_NOTE})")
-        for group in groups:
-            class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
-            severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
-            console.print(
-                f"  - tool={sanitize_untrusted(group.tool)} parametro={sanitize_untrusted(group.parameter)} "
-                f"clase={class_label} gravedad={severity_label}"
-            )
-            for finding in group.findings:
-                technique = finding.technique or finding.rule_id
-                call = format_reproduction(finding.reproduction)
-                console.print(
-                    f"      tecnica={sanitize_untrusted(technique)} "
-                    f"reproduccion={sanitize_untrusted(call)} "
-                    f"evidencia={sanitize_untrusted(finding.evidence)}"
-                )
-        return
-
-    title = Text("🔍 Vulnerabilidades confirmadas", style=f"bold {AMBER_BRIGHT}")
+def _findings_summary_table(groups: list[FindingGroup]) -> Table:
+    """Una fila por vulnerabilidad: gravedad, herramienta, parámetro, clase y
+    número de técnicas. Sin columna de reproducción/evidencia (eso va en el
+    bloque a todo el ancho de abajo), así ninguna columna es tan estrecha
+    como para partir una URL larga."""
+    title = Text(
+        f"🔍 {count_phrase(len(groups), 'vulnerabilidad confirmada', 'vulnerabilidades confirmadas')}",
+        style=f"bold {AMBER_BRIGHT}",
+    )
     table = Table(title=title, caption=SEVERITY_NOTE, border_style=AMBER, header_style=f"bold {GOLD}")
     table.add_column("Gravedad")
     table.add_column("Herramienta")
     table.add_column("Parámetro")
     table.add_column("Clase")
-    table.add_column("Técnicas / reproducción / evidencia", overflow="fold")
-
+    table.add_column("Técnicas", justify="right")
     for group in groups:
         class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
         severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
-        detail_lines = []
-        for finding in group.findings:
-            technique = finding.technique or finding.rule_id
-            call = format_reproduction(finding.reproduction)
-            detail_lines.append(
-                f"{sanitize_untrusted(technique)} → {sanitize_untrusted(call)}\n"
-                f"  {sanitize_untrusted(finding.evidence)}"
-            )
         table.add_row(
             Text(severity_label, style=f"bold {RED}"),
             Text(sanitize_untrusted(group.tool)),
             Text(sanitize_untrusted(group.parameter)),
             Text(class_label),
-            Text("\n".join(detail_lines)),
+            Text(str(len(group.findings))),
         )
-    console.print(table)
+    return table
+
+
+def _finding_detail_panel(index: int, group: FindingGroup) -> Panel:
+    """Bloque a todo el ancho de una vulnerabilidad: cada técnica con su
+    reproducción (una llamada por línea) y su evidencia."""
+    class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
+    severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
+
+    header = Text()
+    header.append(f"Vulnerabilidad {index}", style=f"bold {AMBER_BRIGHT}")
+    header.append(f" · {severity_label}", style=f"bold {RED}")
+    header.append(" · ")
+    header.append(sanitize_untrusted(group.tool), style="bold")
+    if group.parameter:
+        header.append(f" (parámetro {sanitize_untrusted(group.parameter)})")
+    header.append(f" · {class_label}", style=GOLD)
+
+    body = Text()
+    for finding in group.findings:
+        technique = finding.technique or finding.rule_id
+        body.append(f"• {sanitize_untrusted(technique)}\n", style=f"bold {GOLD}")
+        for line in format_calls(finding.reproduction):
+            body.append(f"    {sanitize_untrusted(line)}\n")
+        body.append(f"    {sanitize_untrusted(finding.evidence)}\n")
+    if group.vuln_class == VulnClass.SSRF:
+        body.append(f"\n{SSRF_RECEIVER_NOTE}", style="italic")
+
+    return Panel(Text.assemble(header, "\n\n", body), border_style=AMBER, padding=(1, 2))
+
+
+def _render_findings_plain(console: Console, groups: list[FindingGroup]) -> None:
+    console.print(f"{count_phrase(len(groups), 'vulnerabilidad confirmada', 'vulnerabilidades confirmadas')}:")
+    console.print(f"  ({SEVERITY_NOTE})")
+    for index, group in enumerate(groups, start=1):
+        class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
+        severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
+        console.print(
+            f"  {index}. gravedad={severity_label} tool={sanitize_untrusted(group.tool)} "
+            f"parametro={sanitize_untrusted(group.parameter)} clase={class_label} "
+            f"tecnicas={len(group.findings)}"
+        )
+
+    console.print()
+    console.print("Detalle:")
+    for index, group in enumerate(groups, start=1):
+        class_label = CLASS_LABELS.get(group.vuln_class.value, group.vuln_class.value)
+        severity_label = SEVERITY_LABELS.get(group.severity, group.severity)
+        console.print(
+            f"  [{index}] tool={sanitize_untrusted(group.tool)} parametro={sanitize_untrusted(group.parameter)} "
+            f"clase={class_label} gravedad={severity_label}"
+        )
+        for finding in group.findings:
+            technique = finding.technique or finding.rule_id
+            console.print(f"      tecnica={sanitize_untrusted(technique)}")
+            for line in format_calls(finding.reproduction):
+                console.print(f"        {sanitize_untrusted(line)}")
+            console.print(f"        evidencia={sanitize_untrusted(finding.evidence)}")
+        if group.vuln_class == VulnClass.SSRF:
+            console.print(f"      nota={SSRF_RECEIVER_NOTE}")
+
+
+def render_findings_table(console: Console, findings: list[Finding], *, plain: bool) -> None:
+    groups = group_findings(findings)
+    if not groups:
+        return
+
+    if plain:
+        _render_findings_plain(console, groups)
+        return
+
+    console.print(_findings_summary_table(groups))
+    console.print()
+    for index, group in enumerate(groups, start=1):
+        console.print(_finding_detail_panel(index, group))
 
 
 def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[dict]], *, plain: bool) -> None:
@@ -210,7 +262,7 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
     if total == 0:
         return
     if plain:
-        console.print("Intentos inconclusos:")
+        console.print(f"{count_phrase(total, 'intento inconcluso', 'intentos inconclusos')}:")
         for class_name, items in inconclusive_by_class.items():
             class_label = CLASS_LABELS.get(class_name, class_name)
             for item in items:
@@ -222,7 +274,9 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
                 )
         return
 
-    title = Text(f"⚠️  Intentos inconclusos ({total})", style=f"bold {YELLOW}")
+    title = Text(
+        f"⚠️  {count_phrase(total, 'intento inconcluso', 'intentos inconclusos')}", style=f"bold {YELLOW}"
+    )
     table = Table(title=title, border_style=YELLOW, header_style=f"bold {GOLD}")
     table.add_column("Clase")
     table.add_column("Herramienta")
@@ -251,13 +305,14 @@ class ScanSummary:
 
 
 def render_summary(console: Console, summary: ScanSummary, *, plain: bool) -> None:
-    vuln_text = f"{summary.vulnerabilities} vulnerabilidades confirmadas ({summary.techniques} técnicas)"
+    vuln_phrase = count_phrase(summary.vulnerabilities, "vulnerabilidad confirmada", "vulnerabilidades confirmadas")
+    techniques_phrase = count_phrase(summary.techniques, "técnica", "técnicas")
+    inconclusive_phrase = count_phrase(summary.inconclusive, "inconcluso", "inconclusos")
+    vuln_text = f"{vuln_phrase} ({techniques_phrase})"
+
     if plain:
         status = "FAIL" if summary.vulnerabilities else ("WARN" if summary.inconclusive else "OK")
-        console.print(
-            f"[{status}] {vuln_text}, inconclusos={summary.inconclusive} "
-            f"tiempo={summary.elapsed_seconds:.1f}s"
-        )
+        console.print(f"[{status}] {vuln_text}, {inconclusive_phrase} tiempo={summary.elapsed_seconds:.1f}s")
         return
 
     if summary.vulnerabilities:
@@ -270,7 +325,7 @@ def render_summary(console: Console, summary: ScanSummary, *, plain: bool) -> No
     text = Text()
     text.append(f"{icon} ", style=f"bold {style}")
     text.append(f"{vuln_text}, ", style=f"bold {style}")
-    text.append(f"{summary.inconclusive} inconclusos, ", style=style)
+    text.append(f"{inconclusive_phrase}, ", style=style)
     text.append(f"{summary.elapsed_seconds:.1f}s totales", style=style)
     console.print(Panel(text, border_style=style, padding=(0, 2)))
 

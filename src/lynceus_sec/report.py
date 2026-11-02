@@ -24,6 +24,12 @@ SEVERITY_LABELS: dict[str, str] = {
 
 SEVERITY_NOTE = "La gravedad se asigna por clase de vulnerabilidad; no es una puntuación CVSS."
 
+SSRF_RECEIVER_NOTE = (
+    "El receptor y su red son temporales: se crean para esta ejecución y se "
+    "borran al terminar. Para reproducirlo, sustituye la URL del receptor "
+    "por un receptor propio."
+)
+
 
 @dataclass
 class FindingGroup:
@@ -74,7 +80,19 @@ def format_call(call: ReproductionCall) -> str:
     return f"{call.tool}({args})"
 
 
-def format_reproduction(calls: list[ReproductionCall] | None) -> str:
+def format_calls(calls: list[ReproductionCall] | None) -> list[str]:
+    """Una cadena por llamada: para reproducciones de varios pasos (p. ej. SSRF),
+    cada llamada va en su propia línea en vez de todas unidas en una sola."""
     if not calls:
-        return "(no disponible)"
-    return "; ".join(format_call(call) for call in calls)
+        return ["(no disponible)"]
+    return [format_call(call) for call in calls]
+
+
+def format_reproduction(calls: list[ReproductionCall] | None) -> str:
+    return "; ".join(format_calls(calls))
+
+
+def count_phrase(count: int, singular: str, plural: str) -> str:
+    """Concordancia de número: "1 vulnerabilidad confirmada" frente a
+    "2 vulnerabilidades confirmadas"."""
+    return f"{count} {singular if count == 1 else plural}"

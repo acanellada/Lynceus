@@ -3,11 +3,15 @@ from types import SimpleNamespace
 from rich.console import Console
 
 from lynceus_sec.cli_render import (
+    ScanSummary,
     is_plain_mode,
     render_findings_table,
+    render_inconclusive,
+    render_summary,
     sanitize_untrusted,
 )
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
+from lynceus_sec.report import SSRF_RECEIVER_NOTE
 
 
 def test_sanitize_strips_ansi_escape_sequences():
@@ -82,8 +86,10 @@ def test_render_findings_table_plain_groups_and_uses_readable_names(capsys):
     assert "shell_semicolon_bare" in out
     assert "shell_and_bare" in out
     assert "git_log(ref='; touch /tmp/x')" in out
-    # Una sola fila de vulnerabilidad, no una por técnica.
-    assert out.count("tool=git_log parametro=ref") == 1
+    # Una sola vulnerabilidad, no una por técnica: aparece una vez en el
+    # resumen enumerado y una vez en la cabecera de su bloque de detalle.
+    assert out.count("tool=git_log parametro=ref") == 2
+    assert "[2]" not in out
 
 
 def test_render_findings_table_plain_shows_severity_note(capsys):
@@ -110,3 +116,91 @@ def test_render_findings_table_empty_prints_nothing(capsys):
     render_findings_table(console, [], plain=True)
     out = capsys.readouterr().out
     assert out == ""
+
+
+def test_render_findings_table_plain_shows_ssrf_note_only_for_ssrf_group(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    cmdi_finding = _finding()
+    ssrf_finding = _finding(
+        vuln_class=VulnClass.SSRF, rule_id="ssrf-host_url", technique="host_url",
+        tool="fetch", parameter="url",
+        reproduction=[ReproductionCall(tool="fetch", arguments={"url": "http://recv:8080/tok"})],
+    )
+
+    render_findings_table(console, [cmdi_finding, ssrf_finding], plain=True)
+    out = capsys.readouterr().out
+
+    assert out.count(SSRF_RECEIVER_NOTE) == 1
+
+
+def test_render_findings_table_rich_keeps_reproduction_url_on_one_line():
+    """La reproducción de SSRF va en el bloque a todo el ancho, no en una
+    columna estrecha: una URL de longitud normal no debe partirse."""
+    console = Console(record=True, width=100)
+    url = "http://lynceus-receiver-abc123def456:8080/9f86d081884c7d659a2f"
+    finding = _finding(
+        vuln_class=VulnClass.SSRF, rule_id="ssrf-host_url", tool="fetch", parameter="url", technique="host_url",
+        reproduction=[ReproductionCall(tool="fetch", arguments={"url": url})],
+    )
+
+    render_findings_table(console, [finding], plain=False)
+    out = console.export_text()
+
+    assert url in out
+
+
+def test_render_findings_table_rich_has_summary_table_and_detail_block():
+    console = Console(record=True, width=100)
+    finding = _finding()
+
+    render_findings_table(console, [finding], plain=False)
+    out = console.export_text()
+
+    assert "Técnicas" in out  # columna de la tabla resumen
+    assert "Vulnerabilidad 1" in out  # cabecera del bloque de detalle
+
+
+def test_render_summary_plain_uses_singular_for_one_vulnerability_and_technique(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    summary = ScanSummary(vulnerabilities=1, techniques=1, inconclusive=0, elapsed_seconds=0.5)
+
+    render_summary(console, summary, plain=True)
+    out = capsys.readouterr().out
+
+    assert "1 vulnerabilidad confirmada (1 técnica)" in out
+
+
+def test_render_summary_plain_uses_plural_for_many(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    summary = ScanSummary(vulnerabilities=2, techniques=3, inconclusive=1, elapsed_seconds=0.5)
+
+    render_summary(console, summary, plain=True)
+    out = capsys.readouterr().out
+
+    assert "2 vulnerabilidades confirmadas (3 técnicas)" in out
+    assert "1 inconcluso" in out
+
+
+def test_render_inconclusive_plain_uses_singular_for_one_item(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    inconclusive = {"ssrf": [{"tool": "x", "parameter": "y", "technique": "z", "detail": "d"}]}
+
+    render_inconclusive(console, inconclusive, plain=True)
+    out = capsys.readouterr().out
+
+    assert "1 intento inconcluso:" in out
+
+
+def test_render_inconclusive_rich_title_uses_plural_for_many():
+    console = Console(record=True, width=100)
+    inconclusive = {
+        "ssrf": [
+            {"tool": "x", "parameter": "y", "technique": "z", "detail": "d"},
+            {"tool": "x2", "parameter": "y2", "technique": "z2", "detail": "d2"},
+        ]
+    }
+
+    render_inconclusive(console, inconclusive, plain=False)
+    out = console.export_text()
+
+    assert "2 intentos inconclusos" in out
