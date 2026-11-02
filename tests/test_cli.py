@@ -206,6 +206,14 @@ def test_scan_html_report_is_written(case_dir, tmp_path):
 
 # -- ayuda --------------------------------------------------------------------
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Quita los códigos ANSI que Typer emite en CI (p. ej. bajo GITHUB_ACTIONS)."""
+    return _ANSI_RE.sub("", text)
+
+
 def test_root_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -216,15 +224,17 @@ def test_root_help_lists_commands():
 def test_scan_help_lists_options():
     result = runner.invoke(app, ["scan", "--help"])
     assert result.exit_code == 0
+    output = _strip_ansi(result.stdout)
     for option in ("--classes", "--json", "--report", "--plain"):
-        assert option in result.stdout
+        assert option in output
 
 
 def test_bench_help_lists_options():
     result = runner.invoke(app, ["bench", "--help"])
     assert result.exit_code == 0
-    assert "--classes" in result.stdout
-    assert "--plain" in result.stdout
+    output = _strip_ansi(result.stdout)
+    assert "--classes" in output
+    assert "--plain" in output
 
 
 # -- bench --------------------------------------------------------------------
