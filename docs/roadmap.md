@@ -57,3 +57,8 @@ Solo después de tener una línea base sin LLM medida.
 - Nivel mínimo de aislamiento del sandbox.
 - Coste por análisis de la capa de agentes.
 - Modelo de negocio: núcleo abierto con capa de pago, sin decidir.
+
+## Distribución (después de v1)
+
+- Empaquetar Lynceus como skill (formato SKILL.md) para que un agente de código lo use al desarrollar servidores MCP. Condición: versión instalable, documentada y con las tres clases de v1 validadas dinámicamente.
+- Canales a valorar entonces: el propio repositorio y marketplaces de skills (por ejemplo, Agensi). No listar antes de cumplir la condición.
