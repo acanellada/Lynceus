@@ -143,6 +143,14 @@ Lectura: es la primera vulnerabilidad real reproducida por Lynceus y distinguida
 
 Limitaciones: un solo CVE. Si el servidor usa un límite distinto de su directorio personal, hay que declararlo. Unos 95 segundos por versión (un servidor nuevo por intento). El control positivo lista todos los parámetros, aunque la mayoría de herramientas no devuelven contenido.
 
+## Índices de confianza para servidores MCP (03/11/2026)
+
+Existen varios índices comerciales que puntúan servidores MCP (M8ven, CraftedTrust, Canopii, Dominion Observatory, entre otros). M8ven indexó este repositorio por su cuenta y analizó sus 64 archivos Python en el commit e1fcf71: 74/100, "No concerning findings". Sus comprobaciones públicas cubren exfiltración de credenciales, acceso a ficheros sensibles y ofuscación, y la nota la limita sobre todo la reputación (estrellas, colaboradores y antigüedad).
+
+Lectura: el repositorio contiene 12 servidores MCP vulnerables a propósito (inyección de comandos con shell=True y os.system, path traversal y SSRF) y el resumen público no señala ninguno. Indica que este tipo de índice se centra en servidores maliciosos y en señales de reputación, no en fallos de implementación explotables, que es el problema que aborda Lynceus.
+
+Limitaciones: un solo índice; su auditoría completa solo está disponible para quien reclama la ficha y podría contener más; también clasificó Lynceus como servidor MCP y le atribuyó las herramientas de los casos del benchmark.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
