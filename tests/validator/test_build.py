@@ -255,10 +255,47 @@ def test_detect_target_platform_raises_on_timeout(monkeypatch):
         build.detect_target_platform("lynceus-sandbox:0.1")
 
 
+# --- _check_images: Docker en pausa no debe confundirse con "no existe" -----
+
+
+def test_check_images_raises_a_distinct_error_when_docker_is_not_responding(monkeypatch):
+    """Con Docker parado/en pausa, `docker image inspect` falla igual que si
+    la imagen no existiera; el error debe distinguir ambos casos (ver
+    `_docker_responding`), no sugerir reconstruir una imagen que sí existe."""
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: False)
+    monkeypatch.setattr(build, "_image_exists", lambda image: True)
+
+    with pytest.raises(build.BuildError, match="Docker no responde"):
+        build._check_images(build.RESOLVER_IMAGE, build.DEFAULT_IMAGE)
+
+
+def test_check_images_checks_docker_responding_before_image_existence(monkeypatch):
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: False)
+
+    def fail_if_called(image):
+        raise AssertionError("no debería comprobar si la imagen existe sin Docker respondiendo")
+
+    monkeypatch.setattr(build, "_image_exists", fail_if_called)
+
+    with pytest.raises(build.BuildError, match="Docker no responde"):
+        build._check_images(build.RESOLVER_IMAGE, build.DEFAULT_IMAGE)
+
+
+def test_run_build_exit_is_a_build_error_when_docker_is_not_responding(monkeypatch, target):
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: False)
+
+    with pytest.raises(build.BuildError, match="Docker no responde"):
+        build.run_build(target, "requirements.txt")
+
+
 # --- orquestación: error por paquete sin binario, sin construir nada --------
 
 def test_run_build_stops_before_docker_build_when_a_dependency_has_no_wheel(monkeypatch, target):
     monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
     monkeypatch.setattr(build, "_image_exists", lambda image: True)  # resolver/base ya existen
     monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
     monkeypatch.setattr(build, "CACHE_ROOT", target.parent / "cache-root")
@@ -289,6 +326,7 @@ def test_run_build_stops_before_docker_build_when_a_dependency_has_no_wheel(monk
 
 def test_run_build_skips_image_rebuild_when_tag_already_exists(monkeypatch, target):
     monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
     monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
     monkeypatch.setattr(build, "CACHE_ROOT", target.parent / "cache-root")
 

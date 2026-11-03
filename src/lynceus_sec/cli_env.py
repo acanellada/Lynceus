@@ -41,6 +41,10 @@ class EnvironmentInfo:
     """Imagen base (con digest) tal como la fija el `FROM` de `sandbox/Dockerfile`."""
     declared_python_version: str | None
     declared_mcp_version: str | None
+    target_image: str | None = None
+    """Imagen en la que corrió el servidor analizado (`--image` de `scan`, o
+    la propia imagen del sandbox si no se dio)."""
+    target_image_id: str | None = None
 
 
 def _package_version() -> str:
@@ -94,13 +98,21 @@ def _declared_mcp_version() -> str | None:
     return match.group(1) if match else None
 
 
-def collect_environment_info(image: str = DEFAULT_IMAGE) -> EnvironmentInfo:
+def collect_environment_info(image: str = DEFAULT_IMAGE, *, target_image: str | None = None) -> EnvironmentInfo:
+    """`target_image` es la imagen objetivo (`--image` de `scan`); si no se da
+    (no se usó `--image`), el servidor corrió en la propia imagen del
+    sandbox, así que se reutiliza su id en vez de inspeccionarla dos veces."""
     dockerfile_text = _dockerfile_text()
+    sandbox_image_id = _docker_image_id(image)
+    resolved_target_image = target_image or image
+    target_image_id = sandbox_image_id if resolved_target_image == image else _docker_image_id(resolved_target_image)
     return EnvironmentInfo(
         lynceus_version=_package_version(),
         sandbox_image=image,
-        sandbox_image_id=_docker_image_id(image),
+        sandbox_image_id=sandbox_image_id,
         base_image_ref=_base_image_ref(dockerfile_text),
         declared_python_version=_declared_python_version(dockerfile_text),
         declared_mcp_version=_declared_mcp_version(),
+        target_image=resolved_target_image,
+        target_image_id=target_image_id,
     )

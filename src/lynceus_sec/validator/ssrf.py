@@ -169,6 +169,7 @@ def validate_case(
     call_timeout: float = 15.0,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
     network = create_internal_network()
@@ -176,12 +177,16 @@ def validate_case(
     discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
     validate_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
     try:
-        check_network_isolation(network, image=image)
-        receiver_name, receiver_ip = start_receiver(network, image=image)
+        # El receptor y la comprobación de aislamiento viven en la imagen del
+        # sandbox siempre, nunca en la imagen objetivo pasada por `image`:
+        # confirman la red, no analizan al servidor.
+        check_network_isolation(network, image=DEFAULT_IMAGE)
+        receiver_name, receiver_ip = start_receiver(network, image=DEFAULT_IMAGE)
         try:
             tools = run_harness(
                 case_dir, image=image, timeout=discover_timeout,
-                network=network, container_name=discover_name, entry=entry, pythonpath=pythonpath,
+                network=network, container_name=discover_name, entry=entry,
+                pythonpath=pythonpath, server_python=server_python,
             )
             attempts = build_attempts(tools, receiver_name, receiver_ip)
             if not attempts:
@@ -189,7 +194,8 @@ def validate_case(
 
             results = run_validate(
                 case_dir, attempts, image=image, call_timeout=call_timeout,
-                network=network, container_name=validate_name, entry=entry, pythonpath=pythonpath,
+                network=network, container_name=validate_name, entry=entry,
+                pythonpath=pythonpath, server_python=server_python,
             )
             log_entries = read_receiver_log(receiver_name)
             return attempts_to_findings(case_id, attempts, results, log_entries)

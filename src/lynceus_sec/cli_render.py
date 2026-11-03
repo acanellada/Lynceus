@@ -117,6 +117,20 @@ def render_fs_root(console: Console, fs_root: str, *, plain: bool) -> None:
     console.print(text)
 
 
+def render_target_image(console: Console, *, image: str, image_id: str | None, plain: bool) -> None:
+    """Imagen en la que corrió el servidor analizado (ver `cli_env.collect_environment_info`)."""
+    id_display = image_id or "desconocido"
+    if plain:
+        console.print(f"[imagen-objetivo] {image} (id: {id_display})")
+        return
+    text = Text()
+    text.append("🎯 ", style=AMBER_BRIGHT)
+    text.append("Imagen objetivo: ", style=f"bold {GOLD}")
+    text.append(image, style=GOLD)
+    text.append(f" (id: {id_display})", style=GOLD)
+    console.print(text)
+
+
 def render_sandbox_status(console: Console, *, class_name: str, network: str, plain: bool) -> None:
     label = CLASS_LABELS.get(class_name, class_name)
     isolation = "red interna aislada (sin salida real)" if network != "none" else "sin red"

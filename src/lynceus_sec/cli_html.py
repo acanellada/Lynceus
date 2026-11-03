@@ -242,6 +242,8 @@ def _environment_block(environment: EnvironmentInfo) -> str:
         + row("Imagen base (Dockerfile, con digest)", environment.base_image_ref)
         + row("Versión de Python", environment.declared_python_version, declared=True)
         + row("Versión de mcp", environment.declared_mcp_version, declared=True)
+        + row("Imagen objetivo", environment.target_image)
+        + row("ID de la imagen objetivo", environment.target_image_id)
         + "</dl>"
     )
 

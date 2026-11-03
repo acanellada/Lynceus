@@ -15,6 +15,10 @@ RECEIVER_PATH = Path(__file__).resolve().with_name("receiver.py")
 DEFAULT_IMAGE = "lynceus-sandbox:0.1"
 SANDBOX_UID = 10001
 
+# Ruta fija del intérprete dentro de las imágenes `lynceus-target:<hash>`
+# (ver validator/build.py, que crea ese venv): nunca la elige el usuario.
+TARGET_PYTHON = "/opt/target/bin/python"
+
 # Punto de entrada por defecto dentro de /case; `lynceus scan --entry` permite
 # indicar otro (ver validación en cli.py y uso en build_docker_command).
 DEFAULT_ENTRY = "server.py"
@@ -58,6 +62,20 @@ def _docker_available() -> bool:
     return shutil.which("docker") is not None
 
 
+def _docker_responding(*, timeout: float = 5.0) -> bool:
+    """A diferencia de `_docker_available` (el binario está en el PATH), esto
+    comprueba que el daemon responde: si Docker está parado o en pausa,
+    `docker image inspect` falla igual que si la imagen no existiera, y ese
+    mensaje sería engañoso (ver `cli._validate_target_image` y
+    `build._check_images`, que comprueban esto antes de mirar si una imagen
+    existe)."""
+    try:
+        proc = subprocess.run(["docker", "info"], check=False, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
+
+
 def _image_exists(image: str) -> bool:
     proc = subprocess.run(["docker", "image", "inspect", image], check=False, capture_output=True)
     return proc.returncode == 0
@@ -92,6 +110,7 @@ def build_docker_command(
     fs_root: str = DEFAULT_FS_ROOT,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
     extra_harness_args: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Construye el comando `docker run` del sandbox. No ejecuta nada.
@@ -102,8 +121,11 @@ def build_docker_command(
     caso) que arranca el harness dentro de `/case`. `pythonpath`, si no está
     vacío, es la única variación añadida a `docker run` además de `HOME`: una
     variable de entorno `PYTHONPATH` con cada ruta unida a `/case/` y las
-    distintas rutas separadas por `:`. El resto de flags de endurecimiento no
-    cambia nunca.
+    distintas rutas separadas por `:`. `server_python`, si se da, es la ruta
+    (fija, ver `TARGET_PYTHON`) con la que el harness arranca el servidor
+    analizado en vez de con su propio intérprete; el harness mismo sigue
+    ejecutándose con el Python por defecto de `image`. El resto de flags de
+    endurecimiento no cambia nunca.
     """
     name = container_name or f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
     flags = _security_flags(memory, cpus, pids_limit, home=fs_root)
@@ -120,6 +142,8 @@ def build_docker_command(
         image,
         "python", "/harness/harness.py", f"/case/{entry}", "--timeout", str(timeout),
     ]
+    if server_python:
+        cmd += ["--server-python", server_python]
     cmd += extra_harness_args or []
     return name, cmd
 
@@ -322,12 +346,13 @@ def run_harness(
     fs_root: str = DEFAULT_FS_ROOT,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
     container_name: str | None = None,
 ) -> list[dict[str, Any]]:
     _check_docker_and_image(image)
     container_name, cmd = build_docker_command(
         case_dir, image=image, timeout=timeout, network=network, fs_root=fs_root,
-        entry=entry, pythonpath=pythonpath, container_name=container_name,
+        entry=entry, pythonpath=pythonpath, server_python=server_python, container_name=container_name,
     )
     payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=timeout + 10)
     return parse_harness_output(payload)
@@ -344,6 +369,7 @@ def run_validate(
     fs_root: str = DEFAULT_FS_ROOT,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
     container_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Ejecuta `attempts` dentro del sandbox (un proceso de servidor nuevo por intento).
@@ -367,7 +393,8 @@ def run_validate(
     ]
     container_name, cmd = build_docker_command(
         case_dir, image=image, timeout=call_timeout, network=network, fs_root=fs_root,
-        entry=entry, pythonpath=pythonpath, container_name=container_name, extra_harness_args=extra_args,
+        entry=entry, pythonpath=pythonpath, server_python=server_python,
+        container_name=container_name, extra_harness_args=extra_args,
     )
     payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=wall_clock_timeout)
 

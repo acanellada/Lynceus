@@ -104,6 +104,72 @@ def test_pythonpath_sets_env_var_joined_under_case_and_keeps_rest_of_protections
     assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
 
 
+def test_no_server_python_means_no_server_python_flag():
+    _, cmd = build_docker_command(CASE_DIR)
+
+    assert "--server-python" not in cmd
+
+
+def test_server_python_appends_flag_and_keeps_rest_of_protections():
+    _, cmd = build_docker_command(CASE_DIR, server_python=runner.TARGET_PYTHON)
+
+    idx = cmd.index("--server-python")
+    assert cmd[idx + 1] == runner.TARGET_PYTHON
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--memory" in cmd
+    assert "--cpus" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
+
+
+def test_server_python_flag_comes_before_extra_harness_args():
+    _, cmd = build_docker_command(CASE_DIR, server_python=runner.TARGET_PYTHON, extra_harness_args=["--mode", "validate"])
+
+    assert cmd.index("--server-python") < cmd.index("--mode")
+
+
+def test_run_harness_forwards_server_python_to_docker_command(monkeypatch):
+    monkeypatch.setattr(runner, "_docker_available", lambda: True)
+    monkeypatch.setattr(runner, "_image_exists", lambda image: True)
+
+    captured = {}
+
+    def fake_build_docker_command(case_dir, **kwargs):
+        captured.update(kwargs)
+        return "lynceus-sandbox-abc", ["docker", "run", "--rm", "image"]
+
+    monkeypatch.setattr(runner, "build_docker_command", fake_build_docker_command)
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps({"tools": []}), stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    run_harness(CASE_DIR, server_python=runner.TARGET_PYTHON)
+
+    assert captured["server_python"] == runner.TARGET_PYTHON
+
+
+def test_run_validate_forwards_server_python_to_docker_command(monkeypatch):
+    from lynceus_sec.validator.runner import run_validate
+
+    monkeypatch.setattr(runner, "_docker_available", lambda: True)
+    monkeypatch.setattr(runner, "_image_exists", lambda image: True)
+
+    captured = {}
+
+    def fake_build_docker_command(case_dir, **kwargs):
+        captured.update(kwargs)
+        return "lynceus-sandbox-abc", ["docker", "run", "--rm", "image"]
+
+    monkeypatch.setattr(runner, "build_docker_command", fake_build_docker_command)
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps({"results": []}), stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    run_validate(CASE_DIR, [], server_python=runner.TARGET_PYTHON)
+
+    assert captured["server_python"] == runner.TARGET_PYTHON
+
+
 def test_container_name_changes_between_calls():
     name_a, _ = build_docker_command(CASE_DIR)
     name_b, _ = build_docker_command(CASE_DIR)
@@ -142,6 +208,43 @@ def test_parse_harness_output_rejects_error_payload():
 def test_parse_harness_output_rejects_missing_tools_key():
     with pytest.raises(RunnerError, match="tools"):
         parse_harness_output({})
+
+
+# --- _docker_responding: el daemon responde, no solo el binario está en el PATH ---
+
+
+def test_docker_responding_true_when_docker_info_succeeds(monkeypatch):
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    assert runner._docker_responding() is True
+
+
+def test_docker_responding_false_when_docker_info_fails(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="", stderr="Cannot connect to the Docker daemon",
+    )
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    assert runner._docker_responding() is False
+
+
+def test_docker_responding_false_on_timeout(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner._docker_responding() is False
+
+
+def test_docker_responding_false_when_binary_is_missing(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner._docker_responding() is False
 
 
 def test_run_harness_fails_clearly_without_docker(monkeypatch):

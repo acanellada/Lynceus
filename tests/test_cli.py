@@ -205,6 +205,89 @@ def test_scan_entry_and_pythonpath_are_forwarded_to_all_validators(case_dir):
     )
 
 
+# -- --image -----------------------------------------------------------------
+
+def test_scan_image_rejects_bad_format(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--image", "not-an-image", "--plain"])
+    assert result.exit_code == 2
+    assert "--image" in result.stdout
+
+
+def test_scan_image_rejects_wrong_tag_length(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--image", "lynceus-target:abc123", "--plain"])
+    assert result.exit_code == 2
+    assert "--image" in result.stdout
+
+
+def test_scan_image_rejects_uppercase_hex(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--image", "lynceus-target:ABC123DEF456", "--plain"])
+    assert result.exit_code == 2
+    assert "--image" in result.stdout
+
+
+def test_scan_image_rejects_well_formed_tag_that_does_not_exist_locally(case_dir):
+    with patch("lynceus_sec.cli._docker_responding", return_value=True), \
+         patch("lynceus_sec.cli._image_exists", return_value=False) as image_exists_mock:
+        result = runner.invoke(app, ["scan", str(case_dir), "--image", "lynceus-target:abc123def456", "--plain"])
+    assert result.exit_code == 2
+    assert "no existe en local" in result.stdout
+    image_exists_mock.assert_called_once_with("lynceus-target:abc123def456")
+
+
+def test_scan_image_reports_docker_not_responding_distinctly_from_missing_image(case_dir):
+    """Con Docker en pausa, no debe decir que la imagen no existe (sería
+    engañoso): un error distinto, y no debe ni llegar a comprobar la imagen."""
+    with patch("lynceus_sec.cli._docker_responding", return_value=False), \
+         patch("lynceus_sec.cli._image_exists") as image_exists_mock:
+        result = runner.invoke(app, ["scan", str(case_dir), "--image", "lynceus-target:abc123def456", "--plain"])
+    assert result.exit_code == 2
+    assert "Docker no responde" in result.stdout
+    assert "no existe en local" not in result.stdout
+    image_exists_mock.assert_not_called()
+
+
+def test_scan_image_valid_is_forwarded_to_validators_with_fixed_server_python(case_dir):
+    from lynceus_sec.validator.runner import TARGET_PYTHON
+
+    with patch("lynceus_sec.cli._docker_responding", return_value=True), \
+         patch("lynceus_sec.cli._image_exists", return_value=True), \
+         patch("lynceus_sec.validator.cmdi.validate_case", return_value=([], [], [])) as cmdi_mock, \
+         patch("lynceus_sec.validator.ptrav.validate_case", return_value=([], [], [])) as ptrav_mock, \
+         patch("lynceus_sec.validator.ssrf.validate_case", return_value=([], [])) as ssrf_mock:
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--image", "lynceus-target:abc123def456", "--plain"],
+        )
+
+    assert result.exit_code == 0
+    cmdi_mock.assert_called_once_with(
+        case_dir, entry="server.py", pythonpath=[],
+        image="lynceus-target:abc123def456", server_python=TARGET_PYTHON,
+    )
+    ssrf_mock.assert_called_once_with(
+        case_dir, entry="server.py", pythonpath=[],
+        image="lynceus-target:abc123def456", server_python=TARGET_PYTHON,
+    )
+    ptrav_mock.assert_called_once_with(
+        case_dir, fs_root="/tmp/lynceus-root", entry="server.py", pythonpath=[],
+        image="lynceus-target:abc123def456", server_python=TARGET_PYTHON,
+    )
+    assert "lynceus-target:abc123def456" in result.stdout
+
+
+def test_scan_without_image_does_not_forward_image_kwargs(case_dir):
+    """Sin --image, las llamadas a los validadores no llevan `image` ni
+    `server_python`: el comportamiento es idéntico al de antes de --image."""
+    with patch("lynceus_sec.validator.cmdi.validate_case", return_value=([], [])) as cmdi_mock, \
+         patch("lynceus_sec.validator.ptrav.validate_case", return_value=([], [])) as ptrav_mock, \
+         patch("lynceus_sec.validator.ssrf.validate_case", return_value=([], [])) as ssrf_mock:
+        result = runner.invoke(app, ["scan", str(case_dir), "--classes", "command_injection", "--plain"])
+
+    assert result.exit_code == 0
+    cmdi_mock.assert_called_once_with(case_dir, entry="server.py", pythonpath=[])
+    ptrav_mock.assert_not_called()
+    ssrf_mock.assert_not_called()
+
+
 # -- --classes filtra qué validadores se llaman ---------------------------
 
 def test_scan_classes_option_only_runs_selected_class(case_dir):
@@ -269,6 +352,24 @@ def test_scan_json_report_structure(case_dir, tmp_path):
     assert confirmation["reproduction"] == [{"tool": "git_log", "arguments": {"ref": "; id"}}]
     assert "environment" in payload
     assert payload["environment"]["lynceus_version"]
+    assert payload["environment"]["target_image"] == payload["environment"]["sandbox_image"]
+
+
+def test_scan_json_report_includes_the_target_image_used_with_image_flag(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    with patch("lynceus_sec.cli._docker_responding", return_value=True), \
+         patch("lynceus_sec.cli._image_exists", return_value=True), \
+         _patched_validators(cmdi_result=([], [], [])):
+        result = runner.invoke(
+            app,
+            [
+                "scan", str(case_dir), "--plain", "--classes", "command_injection",
+                "--image", "lynceus-target:abc123def456", "--json", str(json_path),
+            ],
+        )
+    assert result.exit_code == 0
+    payload = json.loads(json_path.read_text())
+    assert payload["environment"]["target_image"] == "lynceus-target:abc123def456"
 
 
 def test_scan_json_groups_multiple_techniques_into_one_vulnerability(case_dir, tmp_path):
@@ -452,6 +553,16 @@ def test_build_exit_code_2_on_build_error(build_target):
     assert "Traceback" not in result.stdout
 
 
+def test_build_exit_code_2_with_distinct_message_when_docker_is_not_responding(build_target):
+    with patch(
+        "lynceus_sec.cli.build_mod.run_build",
+        side_effect=build_mod.BuildError("Docker no responde: ¿está en marcha?"),
+    ):
+        result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "Docker no responde" in result.stdout
+
+
 def test_build_exit_code_0_and_renders_tag_and_versions(build_target):
     with patch("lynceus_sec.cli.build_mod.run_build", return_value=_build_result(build_target)) as run_mock:
         result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
@@ -508,7 +619,7 @@ def test_scan_help_lists_options():
     result = runner.invoke(app, ["scan", "--help"])
     assert result.exit_code == 0
     output = _strip_ansi(result.stdout)
-    for option in ("--classes", "--json", "--report", "--fs-root", "--entry", "--pythonpath", "--plain"):
+    for option in ("--classes", "--json", "--report", "--fs-root", "--entry", "--pythonpath", "--image", "--plain"):
         assert option in output
 
 

@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from lynceus_sec.core.model import ReproductionCall
+from lynceus_sec.validator import ptrav
 from lynceus_sec.validator.payloads import build_path_traversal_payloads
 from lynceus_sec.validator.ptrav import attempts_to_findings, build_attempts
 
@@ -173,3 +176,23 @@ def test_positive_control_with_missing_result_is_reported_separately_from_inconc
     assert inconclusive == []
     assert len(positive_controls) == 1
     assert positive_controls[0]["status"] == "inconclusive"
+
+
+# --- validate_case: --image / --server-python se reenvían a run_harness ---
+
+
+def test_validate_case_forwards_image_and_server_python_to_run_harness(monkeypatch):
+    received = {}
+
+    def fake_run_harness(case_dir, **kwargs):
+        received.update(kwargs)
+        return []  # sin tools: validate_case devuelve antes de llamar a run_validate
+
+    monkeypatch.setattr(ptrav, "run_harness", fake_run_harness)
+
+    ptrav.validate_case(
+        Path("/some/case"), image="lynceus-target:abc123def456", server_python="/opt/target/bin/python",
+    )
+
+    assert received["image"] == "lynceus-target:abc123def456"
+    assert received["server_python"] == "/opt/target/bin/python"

@@ -1,4 +1,7 @@
+from pathlib import Path
+
 from lynceus_sec.core.model import ReproductionCall
+from lynceus_sec.validator import cmdi
 from lynceus_sec.validator.cmdi import attempts_to_findings, build_attempts
 from lynceus_sec.validator.payloads import build_payloads, build_probe_payload
 
@@ -214,3 +217,23 @@ def test_unconfirmed_probe_does_not_create_a_capability():
     assert capabilities == []
     assert inconclusive == []
     assert len(findings) == 1
+
+
+# --- validate_case: --image / --server-python se reenvían a run_harness ---
+
+
+def test_validate_case_forwards_image_and_server_python_to_run_harness(monkeypatch):
+    received = {}
+
+    def fake_run_harness(case_dir, **kwargs):
+        received.update(kwargs)
+        return []  # sin tools: validate_case devuelve antes de llamar a run_validate
+
+    monkeypatch.setattr(cmdi, "run_harness", fake_run_harness)
+
+    cmdi.validate_case(
+        Path("/some/case"), image="lynceus-target:abc123def456", server_python="/opt/target/bin/python",
+    )
+
+    assert received["image"] == "lynceus-target:abc123def456"
+    assert received["server_python"] == "/opt/target/bin/python"

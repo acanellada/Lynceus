@@ -11,6 +11,7 @@ error (argumentos inválidos o fallo resolviendo/construyendo).
 from __future__ import annotations
 
 import json as jsonlib
+import re
 import time
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version
@@ -35,6 +36,7 @@ from lynceus_sec.cli_render import (
     render_report_paths,
     render_sandbox_status,
     render_summary,
+    render_target_image,
     run_with_progress,
 )
 from lynceus_sec.core.metrics import compute_metrics
@@ -46,7 +48,16 @@ from lynceus_sec.validator.bench import (
     run_class_benchmark,
     validate_case_for,
 )
-from lynceus_sec.validator.runner import DEFAULT_ENTRY, DEFAULT_FS_ROOT, RunnerError
+from lynceus_sec.validator.runner import (
+    DEFAULT_ENTRY,
+    DEFAULT_FS_ROOT,
+    TARGET_PYTHON,
+    RunnerError,
+    _docker_responding,
+    _image_exists,
+)
+
+_TARGET_IMAGE_RE = re.compile(r"^lynceus-target:[0-9a-f]{12}$")
 
 app = typer.Typer(
     name="lynceus",
@@ -148,6 +159,26 @@ def _validate_requirements_path(target: Path, requirements: str, console) -> str
     return requirements
 
 
+def _validate_target_image(value: str | None, console) -> str | None:
+    """--image debe tener la forma `lynceus-target:<12 hex>` (ver `validator.build`)
+    y existir ya en local; si no se da (`None`), `scan` se comporta como hoy."""
+    if value is None:
+        return None
+    if not _TARGET_IMAGE_RE.fullmatch(value):
+        console.print(
+            f"Error: --image {value!r} debe tener la forma 'lynceus-target:' "
+            "seguido de 12 caracteres hexadecimales."
+        )
+        raise typer.Exit(2)
+    if not _docker_responding():
+        console.print("Error: Docker no responde: ¿está en marcha?")
+        raise typer.Exit(2)
+    if not _image_exists(value):
+        console.print(f"Error: la imagen {value!r} no existe en local; constrúyela con 'lynceus build'.")
+        raise typer.Exit(2)
+    return value
+
+
 def _validate_resolve_date(value: str | None, console) -> str | None:
     if value is None:
         return None
@@ -242,6 +273,8 @@ def _build_json_payload(
             "base_image_ref": environment.base_image_ref,
             "declared_python_version": environment.declared_python_version,
             "declared_mcp_version": environment.declared_mcp_version,
+            "target_image": environment.target_image,
+            "target_image_id": environment.target_image_id,
         },
     }
 
@@ -269,6 +302,11 @@ def scan(
         [], "--pythonpath",
         help="Carpeta dentro del objetivo a añadir a PYTHONPATH (repetible).",
     ),
+    image: str | None = typer.Option(
+        None, "--image",
+        help="Imagen 'lynceus-target:<12 hex>' (de 'lynceus build') en la que arrancar el servidor; "
+        "por defecto se usa el sandbox y su propio intérprete.",
+    ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
     """Valida dinámicamente una carpeta con server.py frente a las clases indicadas."""
@@ -278,6 +316,7 @@ def scan(
 
     normalized_classes = _normalize_classes(classes, console)
     fs_root = _validate_fs_root(fs_root, console)
+    image = _validate_target_image(image, console)
 
     if not target.is_dir():
         console.print(f"Error: {target} no es una carpeta.")
@@ -288,6 +327,13 @@ def scan(
 
     if "path_traversal" in normalized_classes:
         render_fs_root(console, fs_root, plain=plain_mode)
+
+    # Solo con --image se añaden `image`/`server_python`: sin él, las
+    # llamadas quedan idénticas a las de siempre (mismos defaults de cada
+    # validate_case).
+    image_kwargs: dict[str, str] = {}
+    if image is not None:
+        image_kwargs = {"image": image, "server_python": TARGET_PYTHON}
 
     start = time.monotonic()
     all_findings: list[Finding] = []
@@ -305,13 +351,15 @@ def scan(
                 result = run_with_progress(
                     console, class_name=class_name, plain=plain_mode,
                     fn=lambda validate_case=validate_case: validate_case(
-                        target, fs_root=fs_root, entry=entry, pythonpath=pythonpath,
+                        target, fs_root=fs_root, entry=entry, pythonpath=pythonpath, **image_kwargs,
                     ),
                 )
             else:
                 result = run_with_progress(
                     console, class_name=class_name, plain=plain_mode,
-                    fn=lambda validate_case=validate_case: validate_case(target, entry=entry, pythonpath=pythonpath),
+                    fn=lambda validate_case=validate_case: validate_case(
+                        target, entry=entry, pythonpath=pythonpath, **image_kwargs,
+                    ),
                 )
         except RunnerError as exc:
             label = CLASS_LABELS.get(class_name, class_name)
@@ -347,7 +395,10 @@ def scan(
     )
     render_summary(console, summary, plain=plain_mode)
 
-    environment = collect_environment_info()
+    environment = collect_environment_info(target_image=image)
+    render_target_image(
+        console, image=environment.target_image, image_id=environment.target_image_id, plain=plain_mode,
+    )
 
     if json_path is not None:
         payload = _build_json_payload(

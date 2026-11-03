@@ -176,10 +176,12 @@ def validate_case(
     fs_root: str = DEFAULT_FS_ROOT,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
     tools = run_harness(
-        case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry, pythonpath=pythonpath,
+        case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry,
+        pythonpath=pythonpath, server_python=server_python,
     )
     attempts = build_attempts(tools, fs_root)
     if not attempts:
@@ -187,6 +189,6 @@ def validate_case(
 
     results = run_validate(
         case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root,
-        entry=entry, pythonpath=pythonpath,
+        entry=entry, pythonpath=pythonpath, server_python=server_python,
     )
     return attempts_to_findings(case_id, attempts, results)

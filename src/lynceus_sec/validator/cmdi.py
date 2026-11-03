@@ -197,14 +197,19 @@ def validate_case(
     call_timeout: float = 15.0,
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
+    server_python: str | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
-    tools = run_harness(case_dir, image=image, timeout=discover_timeout, entry=entry, pythonpath=pythonpath)
+    tools = run_harness(
+        case_dir, image=image, timeout=discover_timeout, entry=entry,
+        pythonpath=pythonpath, server_python=server_python,
+    )
     attempts = build_attempts(tools)
     if not attempts:
         return [], [], []
 
     results = run_validate(
-        case_dir, attempts, image=image, call_timeout=call_timeout, entry=entry, pythonpath=pythonpath,
+        case_dir, attempts, image=image, call_timeout=call_timeout, entry=entry,
+        pythonpath=pythonpath, server_python=server_python,
     )
     return attempts_to_findings(case_id, attempts, results)

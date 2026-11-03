@@ -18,6 +18,7 @@ from pathlib import Path
 from lynceus_sec.validator.runner import (
     DEFAULT_IMAGE,
     _docker_available,
+    _docker_responding,
     _image_exists,
     _security_flags,
 )
@@ -227,6 +228,8 @@ def parse_pinned_versions(resolved_text: str) -> list[tuple[str, str]]:
 def _check_images(resolver_image: str, base_image: str) -> None:
     if not _docker_available():
         raise BuildError("Docker no está disponible en el PATH")
+    if not _docker_responding():
+        raise BuildError("Docker no responde: ¿está en marcha?")
     if not _image_exists(resolver_image):
         raise BuildError(
             f"La imagen {resolver_image!r} no existe; constrúyela con "

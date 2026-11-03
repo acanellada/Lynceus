@@ -27,10 +27,12 @@ Dos modos:
     de todas las respuestas se concatenan). La confirmación por token del
     receptor no la decide este harness: vive fuera, en ssrf.py.
 
-El punto de entrada (`server_path`, ya resuelto por el llamador a `/case/<entry>`)
-y el `PYTHONPATH` del servidor analizado (reenviado desde `os.environ`, ver
-`_server_env`) son los dos únicos ejes configurables; el resto de protecciones
-del sandbox no cambia.
+El punto de entrada (`server_path`, ya resuelto por el llamador a `/case/<entry>`),
+el `PYTHONPATH` del servidor analizado (reenviado desde `os.environ`, ver
+`_server_env`) y el intérprete con el que se arranca el servidor (`--server-python`,
+ver `_resolve_interpreter`; por defecto el propio intérprete del harness) son los
+únicos ejes configurables; el resto de protecciones del sandbox no cambia. El
+harness mismo siempre corre con el Python por defecto de la imagen.
 """
 
 import argparse
@@ -133,8 +135,19 @@ def _classify_attempt(
     return {"id": attempt_id, "status": "not_confirmed", "detail": None}
 
 
-async def _list_tools(server_path: str) -> dict[str, Any]:
-    params = StdioServerParameters(command=sys.executable, args=[server_path], env=_server_env())
+def _resolve_interpreter(path: str | None) -> str:
+    """Sin `path`: el propio intérprete del harness. Con `path` (la ruta fija
+    de la imagen objetivo, ver `TARGET_PYTHON` en runner.py): se comprueba que
+    existe antes de arrancar nada; si no, falla con un error claro."""
+    if path is None:
+        return sys.executable
+    if not Path(path).exists():
+        raise FileNotFoundError(f"Intérprete del servidor no encontrado: {path!r}")
+    return path
+
+
+async def _list_tools(server_path: str, interpreter: str) -> dict[str, Any]:
+    params = StdioServerParameters(command=interpreter, args=[server_path], env=_server_env())
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         result = await session.list_tools()
@@ -146,7 +159,7 @@ async def _list_tools(server_path: str) -> dict[str, Any]:
     }
 
 
-async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, str]:
+async def _call_once(server_path: str, attempt: dict[str, Any], interpreter: str) -> tuple[bool, str]:
     """Si procede, planta el canario de lectura y el enlace simbólico; arranca
     un servidor nuevo y ejecuta una única llamada (`tool`/`arguments`) o, si
     el intento lleva `calls`, la secuencia completa en la misma sesión, y lo
@@ -166,7 +179,7 @@ async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, s
         if not link_path.is_symlink():
             link_path.symlink_to(link_target)
 
-    params = StdioServerParameters(command=sys.executable, args=[server_path], env=_server_env())
+    params = StdioServerParameters(command=interpreter, args=[server_path], env=_server_env())
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         calls = attempt.get("calls")
@@ -185,12 +198,14 @@ async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, s
         return is_error, " ".join(texts)
 
 
-async def _run_one_attempt(server_path: str, attempt: dict[str, Any], timeout: float) -> dict[str, Any]:
+async def _run_one_attempt(
+    server_path: str, attempt: dict[str, Any], timeout: float, interpreter: str
+) -> dict[str, Any]:
     protocol_error: str | None = None
     tool_error: str | None = None
     response_text = ""
     try:
-        is_error, text = await asyncio.wait_for(_call_once(server_path, attempt), timeout=timeout)
+        is_error, text = await asyncio.wait_for(_call_once(server_path, attempt, interpreter), timeout=timeout)
         response_text = text
         if is_error:
             tool_error = text or "la tool devolvió un error sin texto"
@@ -222,6 +237,7 @@ async def _validate(
     attempts: list[dict[str, Any]],
     call_timeout: float,
     total_timeout: float,
+    interpreter: str,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + total_timeout
     results = []
@@ -231,7 +247,7 @@ async def _validate(
             results.append({"id": attempt["id"], "status": "inconclusive", "detail": "tiempo total agotado"})
             continue
         per_attempt = max(0.5, min(call_timeout, remaining))
-        results.append(await _run_one_attempt(server_path, attempt, per_attempt))
+        results.append(await _run_one_attempt(server_path, attempt, per_attempt, interpreter))
     return {"results": results}
 
 
@@ -242,7 +258,14 @@ def main() -> int:
     parser.add_argument("--mode", choices=["list", "validate"], default="list")
     parser.add_argument("--attempts", default=None)
     parser.add_argument("--total-timeout", type=float, default=60.0)
+    parser.add_argument("--server-python", default=None)
     args = parser.parse_args()
+
+    try:
+        interpreter = _resolve_interpreter(args.server_python)
+    except FileNotFoundError as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 1
 
     try:
         _prepare_home()
@@ -252,12 +275,12 @@ def main() -> int:
 
     if args.mode == "validate":
         attempts = json.loads(args.attempts)
-        payload = asyncio.run(_validate(args.server_path, attempts, args.timeout, args.total_timeout))
+        payload = asyncio.run(_validate(args.server_path, attempts, args.timeout, args.total_timeout, interpreter))
         print(json.dumps(payload))
         return 0
 
     try:
-        payload = asyncio.run(asyncio.wait_for(_list_tools(args.server_path), timeout=args.timeout))
+        payload = asyncio.run(asyncio.wait_for(_list_tools(args.server_path, interpreter), timeout=args.timeout))
     except Exception as exc:  # noqa: BLE001 - el harness reporta cualquier fallo como JSON, no lo propaga
         print(json.dumps({"error": _describe(exc)}))
         return 1

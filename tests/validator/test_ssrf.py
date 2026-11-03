@@ -361,3 +361,45 @@ def test_server_container_is_killed_by_name_even_on_keyboard_interrupt(monkeypat
     assert len(calls["killed"]) == 2
     assert calls["stopped"] == ["lynceus-receiver-x"]
     assert calls["removed"] == ["lynceus-net-x"]
+
+
+# --- validate_case con --image: receptor y aislamiento siempre en el sandbox ---
+
+
+def test_receiver_and_isolation_always_use_the_sandbox_image_even_with_a_target_image(monkeypatch):
+    """El receptor de canarios y la comprobación de aislamiento confirman la
+    red, no analizan al servidor: deben seguir en `lynceus-sandbox:0.1`
+    aunque el servidor arranque en una imagen `lynceus-target:<hash>`."""
+    received_isolation_image = []
+    received_receiver_image = []
+    received_run_harness_kwargs = {}
+
+    monkeypatch.setattr(ssrf, "create_internal_network", lambda: "lynceus-net-x")
+    monkeypatch.setattr(ssrf, "kill_container", lambda name: None)
+    monkeypatch.setattr(ssrf, "stop_receiver", lambda name: None)
+    monkeypatch.setattr(ssrf, "remove_network", lambda name: None)
+    monkeypatch.setattr(ssrf, "read_receiver_log", lambda name: [])
+
+    def fake_check_network_isolation(network, *, image=ssrf.DEFAULT_IMAGE, **kwargs):
+        received_isolation_image.append(image)
+
+    def fake_start_receiver(network, *, image=ssrf.DEFAULT_IMAGE, **kwargs):
+        received_receiver_image.append(image)
+        return "lynceus-receiver-x", "10.0.0.5"
+
+    def fake_run_harness(case_dir, **kwargs):
+        received_run_harness_kwargs.update(kwargs)
+        return []  # sin tools: validate_case devuelve antes de llamar a run_validate
+
+    monkeypatch.setattr(ssrf, "check_network_isolation", fake_check_network_isolation)
+    monkeypatch.setattr(ssrf, "start_receiver", fake_start_receiver)
+    monkeypatch.setattr(ssrf, "run_harness", fake_run_harness)
+
+    ssrf.validate_case(
+        Path("/some/case"), image="lynceus-target:abc123def456", server_python="/opt/target/bin/python",
+    )
+
+    assert received_isolation_image == [ssrf.DEFAULT_IMAGE]
+    assert received_receiver_image == [ssrf.DEFAULT_IMAGE]
+    assert received_run_harness_kwargs["image"] == "lynceus-target:abc123def456"
+    assert received_run_harness_kwargs["server_python"] == "/opt/target/bin/python"

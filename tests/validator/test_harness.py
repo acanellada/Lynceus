@@ -1,4 +1,5 @@
 import os
+import sys
 
 import pytest
 from mcp.client.stdio import get_default_environment
@@ -8,6 +9,7 @@ from lynceus_sec.validator.harness import (
     _ensure_under_tmp,
     _looks_like_environment_error,
     _prepare_home,
+    _resolve_interpreter,
     _server_env,
 )
 
@@ -111,6 +113,25 @@ def test_ptrav_other_tool_error_is_not_confirmed():
     )
 
     assert result == {"id": "b5", "status": "not_confirmed", "detail": detail}
+
+
+# --- --server-python: ruta fija de la imagen objetivo (ver TARGET_PYTHON) ---
+
+
+def test_resolve_interpreter_defaults_to_sys_executable_when_none():
+    assert _resolve_interpreter(None) == sys.executable
+
+
+def test_resolve_interpreter_returns_the_path_when_it_exists(tmp_path):
+    fake_python = tmp_path / "python"
+    fake_python.write_text("")
+
+    assert _resolve_interpreter(str(fake_python)) == str(fake_python)
+
+
+def test_resolve_interpreter_raises_a_clear_error_when_missing():
+    with pytest.raises(FileNotFoundError, match="Intérprete del servidor no encontrado"):
+        _resolve_interpreter("/opt/target/bin/python")
 
 
 # --- Defensa en profundidad: ninguna ruta fuera de /tmp, nunca se crea nada ---
