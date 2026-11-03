@@ -11,7 +11,7 @@
 
 Lynceus analiza servidores MCP (Model Context Protocol) y **solo reporta los fallos de implementación que consigue reproducir** dentro de un sandbox aislado, con la evidencia y la llamada exacta que los reproduce.
 
-> **Estado:** en desarrollo (v0.0.1). Se instala desde el código fuente; no está publicado en PyPI.
+> **Estado:** en desarrollo (v0.1.0). Se instala desde el código fuente; no está publicado en PyPI.
 
 <p align="center">
   <img src="docs/img/lynceus-scan.png" alt="Ejemplo de lynceus scan confirmando una SSRF" width="100%">
