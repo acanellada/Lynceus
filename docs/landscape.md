@@ -126,6 +126,23 @@ Lectura: ssrf-01-fixed, el falso positivo de las reglas que originó la tesis de
 
 Limitaciones: 8 casos (4 vulnerables), escritos por un agente. El receptor se da por listo cuando su contenedor está en marcha, no cuando acepta conexiones. La comprobación de aislamiento es puntual, antes de los intentos. El token solo se busca en la ruta de la petición. ssrf.py reutiliza funciones privadas de ptrav.py, pendientes de pasar a un módulo común.
 
+## Primer servidor real: CVE-2026-7400 (02/11/2026)
+
+Objetivo: geekgod382/filesystem-mcp-server, servidor Python por stdio con el servidor de bajo nivel del SDK y diez herramientas. La versión 1.0.0 comprueba `abspath(path).startswith(home)`, sin resolver enlaces ni exigir separador; la 1.1.0 (commit 4536454) usa `realpath` y añade el separador.
+
+Primer intento: Lynceus marcó las dos versiones. Causa: el sandbox definía HOME=/tmp, el servidor usa el directorio personal como límite y el canario estaba en /tmp, dentro del límite. Era un falso positivo en la versión corregida: el oráculo de path traversal daba por hecho que /tmp quedaba fuera de cualquier límite, algo cierto en el benchmark propio pero no en un servidor real.
+
+Corrección: límite declarado (por defecto /tmp/lynceus-root, que pasa a ser el HOME del sandbox; configurable con --fs-root) y canarios siempre fuera de él, en tres formas: una carpeta aparte, una carpeta hermana con el mismo prefijo y un enlace simbólico dentro del límite que apunta fuera. Un control positivo informativo comprueba que cada herramienta lee dentro del límite.
+
+| Versión | Antes | Después |
+|---|---|---|
+| 1.0.0 (vulnerable) | Confirmada | Confirmada: carpeta hermana (ruta absoluta y `../`) y enlace simbólico |
+| 1.1.0 (corregida) | Confirmada (falso positivo) | Sin hallazgos |
+
+Lectura: es la primera vulnerabilidad real reproducida por Lynceus y distinguida de su corrección, sin adaptar nada al servidor. El benchmark propio no podía revelar este fallo del oráculo: sus casos son más sencillos que un servidor real.
+
+Limitaciones: un solo CVE. Si el servidor usa un límite distinto de su directorio personal, hay que declararlo. Unos 95 segundos por versión (un servidor nuevo por intento). El control positivo lista todos los parámetros, aunque la mayoría de herramientas no devuelven contenido.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner

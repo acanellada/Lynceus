@@ -58,6 +58,17 @@ Benchmark propio de 24 casos (8 por clase, 4 vulnerables y 4 corregidos), compar
 
 El único falso negativo de la validación dinámica es un caso inconcluso por su entorno (`cmdi-03`). **Cautela:** los casos los escribió un agente de código y ya se han usado durante el desarrollo, así que estas cifras no son una medida independiente. El detalle, la metodología y las limitaciones están en [`docs/landscape.md`](docs/landscape.md).
 
+### Primer servidor real: CVE-2026-7400
+
+`filesystem-mcp-server` (geekgod382) limita el acceso al directorio personal comparando `abspath(path).startswith(home)`, sin resolver enlaces simbólicos ni exigir un separador. Lynceus, sin ninguna adaptación a este servidor:
+
+| Versión | Resultado |
+|---|---|
+| 1.0.0 (vulnerable) | Confirmada: carpeta hermana con el mismo prefijo y enlace simbólico |
+| 1.1.0 (corregida) | Sin hallazgos |
+
+Este caso destapó un falso positivo en la versión anterior de Lynceus (el canario quedaba dentro del límite del servidor), corregido con canarios conscientes del límite.
+
 ## Inicio rápido
 
 Requisitos: Python 3.12, [uv](https://docs.astral.sh/uv/) y Docker.
@@ -99,6 +110,7 @@ uv run lynceus bench --classes command_injection
 | `--json` | `scan` | Ruta donde escribir el informe en JSON (con `schema_version`). |
 | `--report` | `scan` | Ruta donde escribir el informe HTML autónomo, sin JavaScript ni recursos externos. |
 | `--plain` | `scan`, `bench` | Texto plano, sin colores ni emojis: estable para `grep` o CI. |
+| `--fs-root` | `scan` | Límite de sistema de ficheros para path traversal, bajo `/tmp`. Por defecto, `/tmp/lynceus-root`, que también es el directorio personal del servidor en el sandbox. |
 
 ### Códigos de salida de `lynceus scan`
 
@@ -126,6 +138,7 @@ El modelo de amenazas completo está en [`docs/threat-model.md`](docs/threat-mod
 
 - El objetivo debe ser, por ahora, una carpeta con `server.py` que arranque por stdio, con las dependencias de la lista cerrada del sandbox (`mcp` y `requests`).
 - Solo se prueban parámetros de tipo texto y tres clases de vulnerabilidad.
+- Path traversal se evalúa respecto a un límite declarado: si el servidor usa otro límite que no sea su directorio personal, hay que indicarlo con `--fs-root`.
 - En inyección de comandos y path traversal, el oráculo corre en el mismo contenedor que el servidor: un servidor malicioso podría fingir un positivo (nunca ocultar uno real). En SSRF, el oráculo es externo.
 - Un servidor que bloquea las IP privadas bloquea también al receptor de SSRF, aunque su validación tenga un agujero.
 
