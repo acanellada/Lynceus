@@ -69,6 +69,16 @@ El único falso negativo de la validación dinámica es un caso inconcluso por s
 
 Este caso destapó un falso positivo en la versión anterior de Lynceus (el canario quedaba dentro del límite del servidor), corregido con canarios conscientes del límite.
 
+### Segundo servidor real: CVE-2026-7812
+
+`code-mcp` (54yyyu) concatena el parámetro `operation` de `git_operation` a un comando `git` que se ejecuta en una shell. Está escrito para una versión antigua del SDK de MCP, así que Lynceus construye su entorno con las dependencias resueltas a la fecha de su último commit (SDK 1.5.0), en una imagen aparte del harness.
+
+| Herramienta | Resultado |
+|---|---|
+| `git_operation` | Vulnerabilidad crítica confirmada (10 técnicas) |
+| `run_command` | Capacidad por diseño: ejecuta comandos a propósito, así que no se reporta como inyección |
+| Las otras siete | Sin hallazgos |
+
 ## Inicio rápido
 
 Requisitos: Python 3.12, [uv](https://docs.astral.sh/uv/) y Docker.
@@ -93,6 +103,17 @@ uv run lynceus scan ./mi-servidor-mcp --classes ssrf --classes path_traversal
 uv run lynceus scan ./mi-servidor-mcp --json out.json --report out.html
 ```
 
+### `lynceus build`
+
+Construye la imagen de un servidor con sus propias dependencias. La resolución y la descarga se hacen en un contenedor aparte, con red; la imagen se construye después sin red, solo con paquetes precompilados y fijados por hash. Con `--resolve-date`, las dependencias se resuelven tal como estaban en esa fecha, para reproducir el entorno de un CVE:
+
+```bash
+uv run lynceus build ./mi-servidor --requirements requirements.txt --resolve-date 2025-03-22
+uv run lynceus scan ./mi-servidor --image lynceus-target:<etiqueta> --entry main.py --pythonpath src
+```
+
+Requiere construir antes la imagen de resolución: `docker build -t lynceus-resolver:0.1 sandbox/resolver/`.
+
 ### `lynceus bench`
 
 Ejecuta la validación dinámica sobre `benchmark/cases` y muestra la precisión y el recall por clase y globales:
@@ -111,6 +132,9 @@ uv run lynceus bench --classes command_injection
 | `--report` | `scan` | Ruta donde escribir el informe HTML autónomo, sin JavaScript ni recursos externos. |
 | `--plain` | `scan`, `bench` | Texto plano, sin colores ni emojis: estable para `grep` o CI. |
 | `--fs-root` | `scan` | Límite de sistema de ficheros para path traversal, bajo `/tmp`. Por defecto, `/tmp/lynceus-root`, que también es el directorio personal del servidor en el sandbox. |
+| `--entry` | `scan` | Fichero con el que arranca el servidor, relativo a la carpeta. Por defecto, `server.py`. |
+| `--pythonpath` | `scan` | Carpeta (relativa, repetible) que se añade al `PYTHONPATH` del servidor. |
+| `--image` | `scan` | Imagen creada con `lynceus build`, con las dependencias del servidor. |
 
 ### Códigos de salida de `lynceus scan`
 
@@ -136,7 +160,7 @@ El modelo de amenazas completo está en [`docs/threat-model.md`](docs/threat-mod
 
 ## Limitaciones
 
-- El objetivo debe ser, por ahora, una carpeta con `server.py` que arranque por stdio, con las dependencias de la lista cerrada del sandbox (`mcp` y `requests`).
+- Las dependencias del servidor solo se instalan desde paquetes precompilados: un paquete que solo exista como código fuente no se puede usar.
 - Solo se prueban parámetros de tipo texto y tres clases de vulnerabilidad.
 - Path traversal se evalúa respecto a un límite declarado: si el servidor usa otro límite que no sea su directorio personal, hay que indicarlo con `--fs-root`.
 - En inyección de comandos y path traversal, el oráculo corre en el mismo contenedor que el servidor: un servidor malicioso podría fingir un positivo (nunca ocultar uno real). En SSRF, el oráculo es externo.
@@ -144,7 +168,7 @@ El modelo de amenazas completo está en [`docs/threat-model.md`](docs/threat-mod
 
 ## Hoja de ruta
 
-- Probar Lynceus contra servidores MCP reales con CVE publicado, con instalación de dependencias en una fase de construcción separada de la ejecución.
+- Más servidores reales con CVE publicado (por ejemplo, `mcp-server-fetch` para SSRF).
 - Un lote de casos nuevo, no usado durante el desarrollo, para una medida independiente.
 - Salida SARIF y GitHub Action.
 - Distribución como skill para agentes de código, cuando haya una versión estable.

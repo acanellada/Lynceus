@@ -151,6 +151,18 @@ Lectura: el repositorio contiene 12 servidores MCP vulnerables a propósito (iny
 
 Limitaciones: un solo índice; su auditoría completa solo está disponible para quien reclama la ficha y podría contener más; también clasificó Lynceus como servidor MCP y le atribuyó las herramientas de los casos del benchmark.
 
+## Segundo servidor real: CVE-2026-7812 (03/11/2026)
+
+Objetivo: 54yyyu/code-mcp, servidor Python con FastMCP y nueve herramientas, sin versión corregida. Su git_operation ejecuta `git {operation}` en una shell. Para analizarlo hicieron falta tres piezas nuevas: el punto de entrada configurable (arranca con main.py e importa el paquete desde src/), un entorno propio (está escrito para el SDK de MCP de marzo de 2025 y falla con el 1.30 del sandbox) y la sonda de capacidad.
+
+Entorno: lynceus build resolvió las dependencias a la fecha de su último commit (SDK 1.5.0) en un contenedor con red, descargó solo paquetes precompilados con hash y construyó la imagen sin red. El harness sigue con su propio SDK 1.30 en la misma imagen, y la conexión entre ambas versiones funcionó. La resolución es reproducible: repetida, produce la misma imagen.
+
+Resultado: git_operation, vulnerabilidad crítica confirmada con 10 técnicas. run_command, clasificada como capacidad, porque la sonda `touch <canario>` sin metacaracteres se ejecuta: la herramienta ejecuta comandos por diseño. Ningún hallazgo en las otras siete herramientas. Unos 220 segundos.
+
+Observación: run_command intenta limitarse a un comando simple con una lista negra de operadores (`;`, `&&`, `||`, `>`, `|`, `<`), y el salto de línea, `$(...)` y las comillas invertidas la eluden. Como ya ejecuta cualquier comando, el impacto adicional es pequeño, pero es un patrón que merece señalarse: una capacidad con un filtro eludible.
+
+Limitaciones: sin versión corregida, este caso mide la detección pero no la capacidad de distinguir una corrección.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
