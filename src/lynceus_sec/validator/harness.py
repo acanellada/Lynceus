@@ -26,6 +26,11 @@ Dos modos:
     (cualquier llamada con error marca el intento como erróneo; los textos
     de todas las respuestas se concatenan). La confirmación por token del
     receptor no la decide este harness: vive fuera, en ssrf.py.
+
+El punto de entrada (`server_path`, ya resuelto por el llamador a `/case/<entry>`)
+y el `PYTHONPATH` del servidor analizado (reenviado desde `os.environ`, ver
+`_server_env`) son los dos únicos ejes configurables; el resto de protecciones
+del sandbox no cambia.
 """
 
 import argparse
@@ -69,6 +74,17 @@ def _prepare_home() -> None:
     """Crea $HOME (o el valor por defecto) si no existe, antes de arrancar cualquier servidor."""
     home = _ensure_under_tmp(os.environ.get("HOME", _DEFAULT_HOME), what="HOME")
     home.mkdir(parents=True, exist_ok=True)
+
+
+def _server_env() -> dict[str, str] | None:
+    """`stdio_client` no hereda el entorno completo del harness por seguridad
+    (solo una lista fija de variables vía `get_default_environment()`, entre
+    ellas `HOME`); lo que se pase aquí se combina con esas por encima, nunca
+    las sustituye (`get_default_environment() | (server.env or {})` en el
+    SDK). Por eso basta con reenviar `PYTHONPATH` si está fijado: `HOME` y el
+    resto de variables por defecto llegan igual al servidor analizado."""
+    pythonpath = os.environ.get("PYTHONPATH")
+    return {"PYTHONPATH": pythonpath} if pythonpath else None
 
 
 def _describe(exc: BaseException) -> str:
@@ -118,7 +134,7 @@ def _classify_attempt(
 
 
 async def _list_tools(server_path: str) -> dict[str, Any]:
-    params = StdioServerParameters(command=sys.executable, args=[server_path])
+    params = StdioServerParameters(command=sys.executable, args=[server_path], env=_server_env())
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         result = await session.list_tools()
@@ -150,7 +166,7 @@ async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, s
         if not link_path.is_symlink():
             link_path.symlink_to(link_target)
 
-    params = StdioServerParameters(command=sys.executable, args=[server_path])
+    params = StdioServerParameters(command=sys.executable, args=[server_path], env=_server_env())
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         calls = attempt.get("calls")

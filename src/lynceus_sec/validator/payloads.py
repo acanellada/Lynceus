@@ -58,6 +58,15 @@ def build_payloads() -> list[Payload]:
     return payloads
 
 
+def build_probe_payload() -> Payload:
+    """Sonda de capacidad: el valor es exactamente "touch <canario>", sin
+    metacaracteres ni prefijo inocuo delante. Si esto crea el canario, el
+    parámetro no necesitó ninguna técnica de inyección: la herramienta
+    ejecuta su valor como comando por diseño, no por un fallo de saneado."""
+    canary = _random_canary_path()
+    return Payload(technique="capability_probe", canary_path=canary, value=f"touch {canary}")
+
+
 _TRAVERSAL_DEPTH = 8
 
 # Carpeta aparte, siempre fuera de cualquier límite (`fs_root`): nombre fijo,

@@ -1,12 +1,14 @@
 import os
 
 import pytest
+from mcp.client.stdio import get_default_environment
 
 from lynceus_sec.validator.harness import (
     _classify_attempt,
     _ensure_under_tmp,
     _looks_like_environment_error,
     _prepare_home,
+    _server_env,
 )
 
 
@@ -146,3 +148,35 @@ def test_prepare_home_rejects_a_home_outside_tmp_without_creating_it(monkeypatch
         _prepare_home()
 
     assert not os.path.exists("/etc/evil")
+
+
+# --- Reenvío de PYTHONPATH al subproceso del servidor analizado: ---
+# `stdio_client` combina `env=` con `get_default_environment()` (ver
+# mcp.client.stdio.stdio_client: `get_default_environment() | (server.env or
+# {})`), nunca lo sustituye. `_server_env()` solo debe aportar PYTHONPATH.
+
+
+def test_server_env_is_none_without_pythonpath(monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    assert _server_env() is None
+
+
+def test_server_env_carries_only_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/case/lib:/case/vendor")
+
+    assert _server_env() == {"PYTHONPATH": "/case/lib:/case/vendor"}
+
+
+def test_server_env_merged_with_sdk_defaults_keeps_home_and_adds_pythonpath(monkeypatch):
+    """Reproduce exactamente la combinación que hace `stdio_client` del SDK
+    instalado (`get_default_environment() | (server.env or {})`): comprueba
+    que, con --pythonpath fijado, el servidor analizado sigue recibiendo
+    HOME (y el resto de variables por defecto), no solo PYTHONPATH."""
+    monkeypatch.setenv("HOME", "/tmp/lynceus-root")
+    monkeypatch.setenv("PYTHONPATH", "/case/lib")
+
+    merged = get_default_environment() | (_server_env() or {})
+
+    assert merged["HOME"] == "/tmp/lynceus-root"
+    assert merged["PYTHONPATH"] == "/case/lib"

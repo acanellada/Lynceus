@@ -23,6 +23,7 @@ from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_ssrf_payloads
 from lynceus_sec.validator.ptrav import _base_arguments, _neutral_value, _string_params
 from lynceus_sec.validator.runner import (
+    DEFAULT_ENTRY,
     DEFAULT_IMAGE,
     check_network_isolation,
     create_internal_network,
@@ -166,6 +167,8 @@ def validate_case(
     image: str = DEFAULT_IMAGE,
     discover_timeout: float = 20.0,
     call_timeout: float = 15.0,
+    entry: str = DEFAULT_ENTRY,
+    pythonpath: list[str] | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
     network = create_internal_network()
@@ -178,7 +181,7 @@ def validate_case(
         try:
             tools = run_harness(
                 case_dir, image=image, timeout=discover_timeout,
-                network=network, container_name=discover_name,
+                network=network, container_name=discover_name, entry=entry, pythonpath=pythonpath,
             )
             attempts = build_attempts(tools, receiver_name, receiver_ip)
             if not attempts:
@@ -186,7 +189,7 @@ def validate_case(
 
             results = run_validate(
                 case_dir, attempts, image=image, call_timeout=call_timeout,
-                network=network, container_name=validate_name,
+                network=network, container_name=validate_name, entry=entry, pythonpath=pythonpath,
             )
             log_entries = read_receiver_log(receiver_name)
             return attempts_to_findings(case_id, attempts, results, log_entries)

@@ -71,7 +71,7 @@ def test_scan_exit_code_2_when_server_py_is_missing(tmp_path):
     empty.mkdir()
     result = runner.invoke(app, ["scan", str(empty), "--plain"])
     assert result.exit_code == 2
-    assert "no contiene server.py" in result.stdout
+    assert "no contiene el punto de entrada" in result.stdout
     assert "Traceback" not in result.stdout
 
 
@@ -124,7 +124,7 @@ def test_scan_fs_root_valid_value_is_passed_to_ptrav_validate_case(case_dir):
         )
 
     assert result.exit_code == 0
-    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/mi-limite")
+    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/mi-limite", entry="server.py", pythonpath=[])
     assert "/tmp/mi-limite" in result.stdout
 
 
@@ -135,7 +135,73 @@ def test_scan_fs_root_defaults_to_lynceus_root(case_dir):
         result = runner.invoke(app, ["scan", str(case_dir), "--classes", "path_traversal", "--plain"])
 
     assert result.exit_code == 0
-    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/lynceus-root")
+    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/lynceus-root", entry="server.py", pythonpath=[])
+
+
+# -- --entry / --pythonpath --------------------------------------------------
+
+def test_scan_entry_rejects_path_outside_target(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--entry", "../server.py", "--plain"])
+    assert result.exit_code == 2
+    assert "--entry" in result.stdout
+
+
+def test_scan_entry_rejects_absolute_path(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--entry", "/etc/passwd", "--plain"])
+    assert result.exit_code == 2
+    assert "--entry" in result.stdout
+
+
+def test_scan_entry_rejects_non_python_file(case_dir):
+    (case_dir / "notes.txt").write_text("hola")
+    result = runner.invoke(app, ["scan", str(case_dir), "--entry", "notes.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "--entry" in result.stdout
+    assert ".py" in result.stdout
+
+
+def test_scan_entry_rejects_missing_file(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--entry", "missing.py", "--plain"])
+    assert result.exit_code == 2
+    assert "no contiene el punto de entrada" in result.stdout
+
+
+def test_scan_pythonpath_rejects_path_outside_target(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--pythonpath", "../lib", "--plain"])
+    assert result.exit_code == 2
+    assert "--pythonpath" in result.stdout
+
+
+def test_scan_pythonpath_rejects_absolute_path(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--pythonpath", "/usr/lib", "--plain"])
+    assert result.exit_code == 2
+    assert "--pythonpath" in result.stdout
+
+
+def test_scan_pythonpath_rejects_missing_directory(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--pythonpath", "lib", "--plain"])
+    assert result.exit_code == 2
+    assert "no es una carpeta" in result.stdout
+
+
+def test_scan_entry_and_pythonpath_are_forwarded_to_all_validators(case_dir):
+    (case_dir / "app").mkdir()
+    (case_dir / "app" / "main.py").write_text("# entry\n")
+    (case_dir / "lib").mkdir()
+    with patch("lynceus_sec.validator.cmdi.validate_case", return_value=([], [], [])) as cmdi_mock, \
+         patch("lynceus_sec.validator.ptrav.validate_case", return_value=([], [], [])) as ptrav_mock, \
+         patch("lynceus_sec.validator.ssrf.validate_case", return_value=([], [])) as ssrf_mock:
+        result = runner.invoke(
+            app,
+            ["scan", str(case_dir), "--entry", "app/main.py", "--pythonpath", "lib", "--plain"],
+        )
+
+    assert result.exit_code == 0
+    cmdi_mock.assert_called_once_with(case_dir, entry="app/main.py", pythonpath=["lib"])
+    ssrf_mock.assert_called_once_with(case_dir, entry="app/main.py", pythonpath=["lib"])
+    ptrav_mock.assert_called_once_with(
+        case_dir, fs_root="/tmp/lynceus-root", entry="app/main.py", pythonpath=["lib"]
+    )
 
 
 # -- --classes filtra qué validadores se llaman ---------------------------
@@ -180,7 +246,7 @@ def test_scan_json_report_structure(case_dir, tmp_path):
     assert result.exit_code == 1
     payload = json.loads(json_path.read_text())
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["target"] == str(case_dir)
     assert payload["classes"] == ["command_injection"]
     assert payload["summary"]["vulnerabilities_confirmed"] == 1
@@ -260,6 +326,57 @@ def test_scan_json_includes_fs_root_and_positive_controls_without_affecting_clas
     assert payload["positive_controls"]["path_traversal"] == [positive_control]
 
 
+def _capability(tool="run_shell", parameter="command"):
+    return {
+        "tool": tool,
+        "parameter": parameter,
+        "probe": {
+            "technique": "capability_probe",
+            "payload": "touch /tmp/lynceus-canary-probe",
+            "evidence": "Canario creado en /tmp/lynceus-canary-probe",
+            "reproduction": [ReproductionCall(tool=tool, arguments={parameter: "touch /tmp/lynceus-canary-probe"})],
+        },
+        "confirmations": [
+            {
+                "technique": "shell_semicolon_bare",
+                "payload": "; touch /tmp/lynceus-canary-inj",
+                "evidence": "Canario creado en /tmp/lynceus-canary-inj",
+                "reproduction": [
+                    ReproductionCall(tool=tool, arguments={parameter: "; touch /tmp/lynceus-canary-inj"})
+                ],
+            }
+        ],
+    }
+
+
+def test_scan_json_includes_capabilities_without_affecting_classification(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    with _patched_validators(cmdi_result=([], [], [_capability()])):
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--plain", "--classes", "command_injection", "--json", str(json_path)],
+        )
+    assert result.exit_code == 0
+    payload = json.loads(json_path.read_text())
+
+    assert payload["schema_version"] == 2
+    assert payload["summary"]["vulnerabilities_confirmed"] == 0
+    assert payload["summary"]["techniques_confirmed"] == 0
+    cap = payload["capabilities"]["command_injection"][0]
+    assert cap["tool"] == "run_shell"
+    assert cap["probe"]["payload"] == "touch /tmp/lynceus-canary-probe"
+    assert cap["confirmations"][0]["technique"] == "shell_semicolon_bare"
+    assert "capabilities_note" in payload
+
+
+def test_scan_plain_shows_capability_section_and_explanation(case_dir):
+    with _patched_validators(cmdi_result=([], [], [_capability()])):
+        result = runner.invoke(app, ["scan", str(case_dir), "--plain", "--classes", "command_injection"])
+
+    assert result.exit_code == 0
+    assert "capacidad detectada" in result.stdout
+    assert "No es un fallo de implementación" in result.stdout
+
+
 def test_scan_html_report_is_written(case_dir, tmp_path):
     report_path = tmp_path / "out.html"
     with _patched_validators():
@@ -293,7 +410,7 @@ def test_scan_help_lists_options():
     result = runner.invoke(app, ["scan", "--help"])
     assert result.exit_code == 0
     output = _strip_ansi(result.stdout)
-    for option in ("--classes", "--json", "--report", "--fs-root", "--plain"):
+    for option in ("--classes", "--json", "--report", "--fs-root", "--entry", "--pythonpath", "--plain"):
         assert option in output
 
 

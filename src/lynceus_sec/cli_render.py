@@ -34,6 +34,7 @@ from rich.text import Text
 from lynceus_sec.core.metrics import ClassMetrics
 from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
+    CAPABILITY_EXPLANATION,
     CLASS_LABELS,
     SEVERITY_LABELS,
     SEVERITY_NOTE,
@@ -349,6 +350,92 @@ def render_positive_controls(console: Console, positive_controls_by_class: dict[
                 Text(sanitize_untrusted(str(item.get("status")))),
             )
     console.print(table)
+
+
+def _capability_detail_panel(index: int, class_name: str, item: dict) -> Panel:
+    """Bloque a todo el ancho de una capacidad: la sonda que la detectó y
+    cada técnica de inyección agrupada bajo ella, con reproducción."""
+    class_label = CLASS_LABELS.get(class_name, class_name)
+
+    header = Text()
+    header.append(f"Capacidad {index}", style=f"bold {GOLD}")
+    header.append(" · ")
+    header.append(sanitize_untrusted(item.get("tool")), style="bold")
+    if item.get("parameter"):
+        header.append(f" (parámetro {sanitize_untrusted(item['parameter'])})")
+    header.append(f" · {class_label}", style=GOLD)
+
+    body = Text()
+    probe = item.get("probe")
+    if probe:
+        body.append("• sonda: ", style=f"bold {GOLD}")
+        body.append(f"{sanitize_untrusted(probe.get('payload'))}\n")
+        for line in format_calls(probe.get("reproduction")):
+            body.append(f"    {sanitize_untrusted(line)}\n")
+        body.append(f"    {sanitize_untrusted(probe.get('evidence'))}\n")
+    for confirmation in item.get("confirmations", []):
+        body.append(f"• {sanitize_untrusted(confirmation.get('technique'))}\n", style=f"bold {GOLD}")
+        for line in format_calls(confirmation.get("reproduction")):
+            body.append(f"    {sanitize_untrusted(line)}\n")
+        body.append(f"    {sanitize_untrusted(confirmation.get('evidence'))}\n")
+    body.append(f"\n{CAPABILITY_EXPLANATION}", style="italic")
+
+    return Panel(Text.assemble(header, "\n\n", body), border_style=GOLD, padding=(1, 2))
+
+
+def render_capabilities(console: Console, capabilities_by_class: dict[str, list[dict]], *, plain: bool) -> None:
+    """Capacidades de ejecución de comandos por diseño (ver sonda en cmdi.py):
+    no son vulnerabilidades, no cambian el código de salida; se muestran
+    aparte, con su reproducción y la explicación de por qué importan."""
+    total = sum(len(items) for items in capabilities_by_class.values())
+    if total == 0:
+        return
+
+    if plain:
+        console.print(f"{count_phrase(total, 'capacidad detectada', 'capacidades detectadas')}:")
+        console.print(f"  ({CAPABILITY_EXPLANATION})")
+        for class_name, items in capabilities_by_class.items():
+            class_label = CLASS_LABELS.get(class_name, class_name)
+            for item in items:
+                console.print(
+                    f"  - clase={class_label} tool={sanitize_untrusted(item.get('tool'))} "
+                    f"parametro={sanitize_untrusted(item.get('parameter'))}"
+                )
+                probe = item.get("probe")
+                if probe:
+                    for line in format_calls(probe.get("reproduction")):
+                        console.print(f"      sonda: {sanitize_untrusted(line)}")
+                for confirmation in item.get("confirmations", []):
+                    console.print(f"      tecnica={sanitize_untrusted(confirmation.get('technique'))}")
+                    for line in format_calls(confirmation.get("reproduction")):
+                        console.print(f"        {sanitize_untrusted(line)}")
+        return
+
+    title = Text(f"🧰 {count_phrase(total, 'capacidad detectada', 'capacidades detectadas')}", style=f"bold {GOLD}")
+    table = Table(title=title, caption=CAPABILITY_EXPLANATION, border_style=GOLD, header_style=f"bold {GOLD}")
+    table.add_column("Clase")
+    table.add_column("Herramienta")
+    table.add_column("Parámetro")
+    table.add_column("Confirmaciones", justify="right")
+
+    panels: list[Panel] = []
+    index = 0
+    for class_name, items in capabilities_by_class.items():
+        class_label = CLASS_LABELS.get(class_name, class_name)
+        for item in items:
+            index += 1
+            table.add_row(
+                Text(class_label),
+                Text(sanitize_untrusted(item.get("tool"))),
+                Text(sanitize_untrusted(item.get("parameter"))),
+                Text(str(len(item.get("confirmations", [])))),
+            )
+            panels.append(_capability_detail_panel(index, class_name, item))
+
+    console.print(table)
+    console.print()
+    for panel in panels:
+        console.print(panel)
 
 
 @dataclass

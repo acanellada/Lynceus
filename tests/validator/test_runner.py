@@ -63,6 +63,47 @@ def test_fs_root_overrides_home_env_and_keeps_rest_of_protections():
     assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
 
 
+def test_entry_defaults_to_server_py():
+    _, cmd = build_docker_command(CASE_DIR)
+
+    assert "/case/server.py" in cmd
+
+
+def test_entry_overrides_default_and_keeps_rest_of_protections():
+    _, cmd = build_docker_command(CASE_DIR, entry="app/main.py")
+
+    assert "/case/app/main.py" in cmd
+    assert "/case/server.py" not in cmd
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--memory" in cmd
+    assert "--cpus" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
+
+
+def test_no_pythonpath_means_no_pythonpath_env_var():
+    _, cmd = build_docker_command(CASE_DIR)
+
+    assert not any(arg.startswith("PYTHONPATH=") for arg in cmd)
+
+
+def test_pythonpath_sets_env_var_joined_under_case_and_keeps_rest_of_protections():
+    _, cmd = build_docker_command(CASE_DIR, pythonpath=["lib", "vendor"])
+
+    assert "PYTHONPATH=/case/lib:/case/vendor" in cmd
+    idx = cmd.index("-e")
+    assert cmd[idx + 1] == "HOME=/tmp/lynceus-root"
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--memory" in cmd
+    assert "--cpus" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
+
+
 def test_container_name_changes_between_calls():
     name_a, _ = build_docker_command(CASE_DIR)
     name_b, _ = build_docker_command(CASE_DIR)

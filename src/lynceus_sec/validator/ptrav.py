@@ -17,6 +17,7 @@ from lynceus_sec.validator.payloads import (
     build_positive_control_payload,
 )
 from lynceus_sec.validator.runner import (
+    DEFAULT_ENTRY,
     DEFAULT_FS_ROOT,
     DEFAULT_IMAGE,
     run_harness,
@@ -173,12 +174,19 @@ def validate_case(
     discover_timeout: float = 20.0,
     call_timeout: float = 15.0,
     fs_root: str = DEFAULT_FS_ROOT,
+    entry: str = DEFAULT_ENTRY,
+    pythonpath: list[str] | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
-    tools = run_harness(case_dir, image=image, timeout=discover_timeout, fs_root=fs_root)
+    tools = run_harness(
+        case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry, pythonpath=pythonpath,
+    )
     attempts = build_attempts(tools, fs_root)
     if not attempts:
         return [], [], []
 
-    results = run_validate(case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root)
+    results = run_validate(
+        case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root,
+        entry=entry, pythonpath=pythonpath,
+    )
     return attempts_to_findings(case_id, attempts, results)

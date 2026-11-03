@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from lynceus_sec.cli_env import EnvironmentInfo
 from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
+    CAPABILITY_EXPLANATION,
     CLASS_LABELS,
     SEVERITY_LABELS,
     SEVERITY_NOTE,
@@ -195,6 +196,38 @@ def _positive_control_rows(positive_controls_by_class: dict[str, list[dict]]) ->
     return "".join(rows)
 
 
+def _capability_confirmations_list(item: dict) -> str:
+    rows = []
+    probe = item.get("probe")
+    if probe:
+        call = html.escape(format_reproduction(probe.get("reproduction")))
+        evidence = html.escape(probe.get("evidence") or "")
+        rows.append(f"<li><strong>sonda</strong> &rarr; <span class=\"mono\">{call}</span><br>{evidence}</li>")
+    for confirmation in item.get("confirmations", []):
+        technique = html.escape(confirmation.get("technique") or "")
+        call = html.escape(format_reproduction(confirmation.get("reproduction")))
+        evidence = html.escape(confirmation.get("evidence") or "")
+        rows.append(f"<li><strong>{technique}</strong> &rarr; <span class=\"mono\">{call}</span><br>{evidence}</li>")
+    return f'<ul class="confirmations">{"".join(rows)}</ul>'
+
+
+def _capabilities_rows(capabilities_by_class: dict[str, list[dict]]) -> str:
+    all_items = [(class_name, item) for class_name, items in capabilities_by_class.items() for item in items]
+    if not all_items:
+        return '<tr><td colspan="4" class="muted">Ninguna capacidad detectada.</td></tr>'
+    rows = []
+    for class_name, item in all_items:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(CLASS_LABELS.get(class_name, class_name))}</td>"
+            f"<td class=\"mono\">{html.escape(str(item.get('tool', '')))}</td>"
+            f"<td class=\"mono\">{html.escape(str(item.get('parameter', '')))}</td>"
+            f"<td>{_capability_confirmations_list(item)}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
 def _environment_block(environment: EnvironmentInfo) -> str:
     def row(label: str, value: str | None, *, declared: bool = False) -> str:
         shown = value if value is not None else "desconocido"
@@ -221,6 +254,7 @@ def build_html_report(
     findings: list[Finding],
     inconclusive_by_class: dict[str, list[dict]],
     positive_controls_by_class: dict[str, list[dict]],
+    capabilities_by_class: dict[str, list[dict]],
     elapsed_seconds: float,
     environment: EnvironmentInfo,
 ) -> str:
@@ -287,6 +321,15 @@ def build_html_report(
     <table>
       <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th><th>Estado</th></tr></thead>
       <tbody>{_positive_control_rows(positive_controls_by_class)}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>🧰 Capacidades</h2>
+    <p class="muted">{html.escape(CAPABILITY_EXPLANATION)}</p>
+    <table>
+      <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th><th>Confirmaciones (reproducción y evidencia)</th></tr></thead>
+      <tbody>{_capabilities_rows(capabilities_by_class)}</tbody>
     </table>
   </section>
 

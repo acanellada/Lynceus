@@ -30,6 +30,12 @@ SSRF_RECEIVER_NOTE = (
     "por un receptor propio."
 )
 
+CAPABILITY_EXPLANATION = (
+    "No es un fallo de implementación: la herramienta ejecuta comandos por "
+    "diseño. Un agente manipulado podría usar esta capacidad para ejecutar "
+    "comandos arbitrarios."
+)
+
 
 @dataclass
 class FindingGroup:

@@ -38,7 +38,7 @@ def _malicious_finding() -> Finding:
 def test_html_report_escapes_malicious_tool_and_evidence():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_malicious_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "<script>alert(document.cookie)</script>" not in html_out
     assert "<script>evil()</script>" not in html_out
@@ -48,7 +48,7 @@ def test_html_report_escapes_malicious_tool_and_evidence():
 def test_html_report_escapes_malicious_parameter_and_reproduction_call():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_malicious_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert '"><img src=x onerror=alert(1)>' not in html_out
     assert "<svg onload=alert(1)>" not in html_out
@@ -59,7 +59,7 @@ def test_html_report_escapes_malicious_inconclusive_detail():
     inconclusive = {"ssrf": [{"tool": "<b>x</b>", "parameter": "url", "technique": "t", "detail": "<svg onload=alert(1)>"}]}
     html_out = build_html_report(
         target="/tmp/case", classes=["ssrf"], findings=[], inconclusive_by_class=inconclusive,
-        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "<svg onload=alert(1)>" not in html_out
     assert "<b>x</b>" not in html_out
@@ -68,7 +68,7 @@ def test_html_report_escapes_malicious_inconclusive_detail():
 def test_html_report_has_csp_meta_blocking_everything_but_inline_style():
     html_out = build_html_report(
         target="/tmp/case", classes=["ssrf"], findings=[], inconclusive_by_class={},
-        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">' in html_out
 
@@ -76,7 +76,7 @@ def test_html_report_has_csp_meta_blocking_everything_but_inline_style():
 def test_html_report_has_no_javascript():
     html_out = build_html_report(
         target="/tmp/case", classes=["ssrf"], findings=[_malicious_finding()], inconclusive_by_class={},
-        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "<script" not in html_out.lower()
     assert "javascript:" not in html_out.lower()
@@ -88,7 +88,7 @@ def test_html_report_has_no_javascript():
 def test_html_report_includes_environment_info_and_declared_markers():
     html_out = build_html_report(
         target="/tmp/case", classes=["ssrf"], findings=[], inconclusive_by_class={},
-        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "sha256:deadbeef" in html_out
     assert "python:3.12-slim@sha256:aa94" in html_out
@@ -103,7 +103,7 @@ def test_html_report_shows_unknown_for_missing_image_id():
     )
     html_out = build_html_report(
         target="/tmp/case", classes=["ssrf"], findings=[], inconclusive_by_class={},
-        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=env,
+        fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=env,
     )
     assert "desconocido" in html_out
 
@@ -114,7 +114,7 @@ def test_html_report_groups_findings_into_one_row_per_vulnerability():
 
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[f1, f2],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert html_out.count("<td class=\"mono\">git_log</td>") == 1
     assert "shell_semicolon_bare" in html_out
@@ -124,7 +124,7 @@ def test_html_report_groups_findings_into_one_row_per_vulnerability():
 def test_html_report_shows_readable_class_and_severity_names():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "Inyección de comandos" in html_out
     assert "Crítica" in html_out
@@ -134,7 +134,7 @@ def test_html_report_shows_readable_class_and_severity_names():
 def test_html_report_shows_severity_disclaimer():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "no es una puntuación CVSS" in html_out
 
@@ -142,7 +142,7 @@ def test_html_report_shows_severity_disclaimer():
 def test_html_report_reproduction_call_comes_from_reproduction_field():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "git_log(ref=&#x27;; id&#x27;)" in html_out
 
@@ -157,7 +157,7 @@ def test_html_report_shows_ssrf_note_only_for_ssrf_findings():
 
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection", "ssrf"], findings=[cmdi_finding, ssrf_finding],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
 
     assert html_out.count(html.escape(SSRF_RECEIVER_NOTE)) == 1
@@ -166,7 +166,7 @@ def test_html_report_shows_ssrf_note_only_for_ssrf_findings():
 def test_html_report_summary_uses_singular_for_one_vulnerability():
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[_finding()],
-        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "1 vulnerabilidad confirmada (1 técnica)" in html_out
 
@@ -178,7 +178,7 @@ def test_html_report_summary_uses_plural_for_many():
 
     html_out = build_html_report(
         target="/tmp/case", classes=["command_injection"], findings=[f1, f2],
-        inconclusive_by_class=inconclusive, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, elapsed_seconds=1.0, environment=ENV,
+        inconclusive_by_class=inconclusive, fs_root="/tmp/lynceus-root", positive_controls_by_class={}, capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
 
     assert "2 vulnerabilidades confirmadas (2 técnicas)" in html_out
@@ -189,7 +189,7 @@ def test_html_report_shows_fs_root_limit():
     html_out = build_html_report(
         target="/tmp/case", classes=["path_traversal"], findings=[],
         inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={},
-        elapsed_seconds=1.0, environment=ENV,
+        capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "/tmp/lynceus-root" in html_out
 
@@ -203,8 +203,46 @@ def test_html_report_escapes_malicious_positive_control_fields():
     html_out = build_html_report(
         target="/tmp/case", classes=["path_traversal"], findings=[],
         inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class=positive_controls,
-        elapsed_seconds=1.0, environment=ENV,
+        capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
     )
     assert "<b>x</b>" not in html_out
     assert "&lt;b&gt;x&lt;/b&gt;" in html_out
     assert "confirmed" in html_out
+
+
+def test_html_report_shows_capability_section_with_reproduction_and_explanation():
+    capabilities = {
+        "command_injection": [
+            {
+                "tool": "<script>run_shell</script>",
+                "parameter": "command",
+                "probe": {
+                    "technique": "capability_probe",
+                    "payload": "touch /tmp/probe",
+                    "evidence": "Canario creado en /tmp/probe",
+                    "reproduction": [ReproductionCall(tool="run_shell", arguments={"command": "touch /tmp/probe"})],
+                },
+                "confirmations": [
+                    {
+                        "technique": "shell_semicolon_bare",
+                        "payload": "; touch /tmp/inj",
+                        "evidence": "Canario creado en /tmp/inj",
+                        "reproduction": [
+                            ReproductionCall(tool="run_shell", arguments={"command": "; touch /tmp/inj"})
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection"], findings=[],
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={},
+        capabilities_by_class=capabilities, elapsed_seconds=1.0, environment=ENV,
+    )
+
+    assert "<script>run_shell</script>" not in html_out
+    assert "&lt;script&gt;run_shell&lt;/script&gt;" in html_out
+    assert "touch /tmp/probe" in html_out
+    assert "shell_semicolon_bare" in html_out
+    assert "No es un fallo de implementación" in html_out

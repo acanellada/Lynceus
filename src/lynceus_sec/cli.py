@@ -20,6 +20,7 @@ from lynceus_sec.cli_render import (
     ScanSummary,
     is_plain_mode,
     make_console,
+    render_capabilities,
     render_findings_table,
     render_fs_root,
     render_header,
@@ -33,13 +34,13 @@ from lynceus_sec.cli_render import (
 )
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, Label
-from lynceus_sec.report import CLASS_LABELS, group_findings
+from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
     validate_case_for,
 )
-from lynceus_sec.validator.runner import DEFAULT_FS_ROOT, RunnerError
+from lynceus_sec.validator.runner import DEFAULT_ENTRY, DEFAULT_FS_ROOT, RunnerError
 
 app = typer.Typer(
     name="lynceus",
@@ -93,6 +94,66 @@ def _validate_fs_root(value: str, console) -> str:
     return str(path)
 
 
+def _validate_entry(target: Path, entry: str, console) -> str:
+    """--entry debe ser una ruta relativa a `target`, sin componentes '..' ni
+    absoluta, apuntar a un fichero existente dentro de la carpeta y terminar
+    en .py."""
+    entry_path = Path(entry)
+    if entry_path.is_absolute() or ".." in entry_path.parts:
+        console.print(f"Error: --entry {entry!r} debe ser relativo a la carpeta, sin rutas absolutas ni '..'.")
+        raise typer.Exit(2)
+    full_path = target / entry_path
+    if not full_path.is_file():
+        console.print(f"Error: {target} no contiene el punto de entrada {entry!r} (o no es un fichero).")
+        raise typer.Exit(2)
+    if full_path.suffix != ".py":
+        console.print(f"Error: --entry {entry!r} debe ser un fichero .py.")
+        raise typer.Exit(2)
+    return entry
+
+
+def _validate_pythonpaths(target: Path, pythonpaths: list[str], console) -> list[str]:
+    """Cada --pythonpath debe ser una ruta relativa a `target`, sin
+    componentes '..' ni absoluta, y apuntar a una carpeta existente dentro
+    de la carpeta analizada."""
+    for raw in pythonpaths:
+        path = Path(raw)
+        if path.is_absolute() or ".." in path.parts:
+            console.print(f"Error: --pythonpath {raw!r} debe ser relativo a la carpeta, sin rutas absolutas ni '..'.")
+            raise typer.Exit(2)
+        if not (target / path).is_dir():
+            console.print(f"Error: --pythonpath {raw!r} no es una carpeta dentro de {target}.")
+            raise typer.Exit(2)
+    return pythonpaths
+
+
+def _serialize_capability_confirmation(confirmation: dict) -> dict:
+    return {
+        "technique": confirmation["technique"],
+        "payload": confirmation["payload"],
+        "evidence": confirmation["evidence"],
+        "reproduction": [call.model_dump() for call in confirmation.get("reproduction") or []],
+    }
+
+
+def _serialize_capabilities(capabilities_by_class: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    return {
+        class_name: [
+            {
+                "tool": item["tool"],
+                "parameter": item.get("parameter"),
+                "probe": _serialize_capability_confirmation(item["probe"]) if item.get("probe") else None,
+                "confirmations": [
+                    _serialize_capability_confirmation(confirmation)
+                    for confirmation in item.get("confirmations", [])
+                ],
+            }
+            for item in items
+        ]
+        for class_name, items in capabilities_by_class.items()
+    }
+
+
 def _build_json_payload(
     *,
     target: str,
@@ -101,12 +162,13 @@ def _build_json_payload(
     findings: list[Finding],
     inconclusive_by_class: dict[str, list[dict]],
     positive_controls_by_class: dict[str, list[dict]],
+    capabilities_by_class: dict[str, list[dict]],
     elapsed_seconds: float,
     environment,
 ) -> dict:
     groups = group_findings(findings)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "target": target,
         "classes": classes,
         "fs_root": fs_root,
@@ -139,6 +201,8 @@ def _build_json_payload(
         ],
         "inconclusive": inconclusive_by_class,
         "positive_controls": positive_controls_by_class,
+        "capabilities": _serialize_capabilities(capabilities_by_class),
+        "capabilities_note": CAPABILITY_EXPLANATION,
         "environment": {
             "lynceus_version": environment.lynceus_version,
             "sandbox_image": environment.sandbox_image,
@@ -165,6 +229,14 @@ def scan(
         help="Límite de sistema de ficheros del servidor analizado (HOME dentro del sandbox); "
         "ruta absoluta bajo /tmp.",
     ),
+    entry: str = typer.Option(
+        DEFAULT_ENTRY, "--entry",
+        help="Punto de entrada .py a arrancar, relativo a la carpeta analizada (por defecto server.py).",
+    ),
+    pythonpath: list[str] = typer.Option(  # noqa: B008 - patrón estándar de typer
+        [], "--pythonpath",
+        help="Carpeta dentro del objetivo a añadir a PYTHONPATH (repetible).",
+    ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
     """Valida dinámicamente una carpeta con server.py frente a las clases indicadas."""
@@ -178,9 +250,9 @@ def scan(
     if not target.is_dir():
         console.print(f"Error: {target} no es una carpeta.")
         raise typer.Exit(2)
-    if not (target / "server.py").is_file():
-        console.print(f"Error: {target} no contiene server.py.")
-        raise typer.Exit(2)
+
+    entry = _validate_entry(target, entry, console)
+    pythonpath = _validate_pythonpaths(target, pythonpath, console)
 
     if "path_traversal" in normalized_classes:
         render_fs_root(console, fs_root, plain=plain_mode)
@@ -189,6 +261,7 @@ def scan(
     all_findings: list[Finding] = []
     inconclusive_by_class: dict[str, list[dict]] = {}
     positive_controls_by_class: dict[str, list[dict]] = {}
+    capabilities_by_class: dict[str, list[dict]] = {}
     had_error = False
 
     for class_name in normalized_classes:
@@ -199,12 +272,14 @@ def scan(
             if class_name == "path_traversal":
                 result = run_with_progress(
                     console, class_name=class_name, plain=plain_mode,
-                    fn=lambda validate_case=validate_case: validate_case(target, fs_root=fs_root),
+                    fn=lambda validate_case=validate_case: validate_case(
+                        target, fs_root=fs_root, entry=entry, pythonpath=pythonpath,
+                    ),
                 )
             else:
                 result = run_with_progress(
                     console, class_name=class_name, plain=plain_mode,
-                    fn=lambda validate_case=validate_case: validate_case(target),
+                    fn=lambda validate_case=validate_case: validate_case(target, entry=entry, pythonpath=pythonpath),
                 )
         except RunnerError as exc:
             label = CLASS_LABELS.get(class_name, class_name)
@@ -212,12 +287,15 @@ def scan(
             had_error = True
             continue
         findings, inconclusive, *rest = result
-        positive_controls = rest[0] if rest else []
         all_findings.extend(findings)
         if inconclusive:
             inconclusive_by_class[class_name] = inconclusive
-        if positive_controls:
-            positive_controls_by_class[class_name] = positive_controls
+        # El tercer elemento es específico de cada clase: controles positivos
+        # (path_traversal) o capacidades de ejecución de comandos (cmdi).
+        if class_name == "path_traversal" and rest and rest[0]:
+            positive_controls_by_class[class_name] = rest[0]
+        elif class_name == "command_injection" and rest and rest[0]:
+            capabilities_by_class[class_name] = rest[0]
 
     elapsed = time.monotonic() - start
 
@@ -226,6 +304,7 @@ def scan(
 
     render_findings_table(console, all_findings, plain=plain_mode)
     render_inconclusive(console, inconclusive_by_class, plain=plain_mode)
+    render_capabilities(console, capabilities_by_class, plain=plain_mode)
     render_positive_controls(console, positive_controls_by_class, plain=plain_mode)
 
     summary = ScanSummary(
@@ -242,7 +321,7 @@ def scan(
         payload = _build_json_payload(
             target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
             inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
-            elapsed_seconds=elapsed, environment=environment,
+            capabilities_by_class=capabilities_by_class, elapsed_seconds=elapsed, environment=environment,
         )
         json_path.write_text(jsonlib.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -250,7 +329,7 @@ def scan(
         html_text = build_html_report(
             target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
             inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
-            elapsed_seconds=elapsed, environment=environment,
+            capabilities_by_class=capabilities_by_class, elapsed_seconds=elapsed, environment=environment,
         )
         report_path.write_text(html_text)
 
