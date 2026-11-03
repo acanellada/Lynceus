@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from lynceus_sec.cli import app
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
+from lynceus_sec.validator import build as build_mod
 from lynceus_sec.validator.bench import CLASS_CONFIG, BenchResult
 
 runner = CliRunner()
@@ -389,6 +390,102 @@ def test_scan_html_report_is_written(case_dir, tmp_path):
     assert "LYNCEUS" in html_text or "L Y N C E U S" in html_text
 
 
+# -- build --------------------------------------------------------------------
+
+@pytest.fixture
+def build_target(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "requirements.txt").write_text("mcp\n")
+    return target
+
+
+def _build_result(target):
+    return build_mod.BuildResult(
+        tag="lynceus-target:abc123def456",
+        resolved_path=target.parent / "cache" / "requirements.resolved.txt",
+        cache_dir=target.parent / "cache",
+        versions=[("mcp", "1.30.0"), ("requests", "2.33.0")],
+        skipped_image_build=False,
+    )
+
+
+def test_build_exit_code_2_when_target_is_not_a_directory(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    result = runner.invoke(app, ["build", str(missing), "--requirements", "requirements.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "no es una carpeta" in result.stdout
+
+
+def test_build_requirements_rejects_path_outside_target(build_target):
+    result = runner.invoke(app, ["build", str(build_target), "--requirements", "../requirements.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "--requirements" in result.stdout
+
+
+def test_build_requirements_rejects_absolute_path(build_target):
+    result = runner.invoke(app, ["build", str(build_target), "--requirements", "/etc/passwd", "--plain"])
+    assert result.exit_code == 2
+    assert "--requirements" in result.stdout
+
+
+def test_build_requirements_rejects_missing_file(build_target):
+    result = runner.invoke(app, ["build", str(build_target), "--requirements", "missing.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "no contiene el fichero de requisitos" in result.stdout
+
+
+def test_build_resolve_date_rejects_bad_format(build_target):
+    result = runner.invoke(
+        app,
+        ["build", str(build_target), "--requirements", "requirements.txt", "--resolve-date", "22-03-2025", "--plain"],
+    )
+    assert result.exit_code == 2
+    assert "--resolve-date" in result.stdout
+
+
+def test_build_exit_code_2_on_build_error(build_target):
+    with patch("lynceus_sec.cli.build_mod.run_build", side_effect=build_mod.BuildError("sin binario: foopkg")):
+        result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
+    assert result.exit_code == 2
+    assert "foopkg" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_build_exit_code_0_and_renders_tag_and_versions(build_target):
+    with patch("lynceus_sec.cli.build_mod.run_build", return_value=_build_result(build_target)) as run_mock:
+        result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
+    assert result.exit_code == 0
+    assert "lynceus-target:abc123def456" in result.stdout
+    assert "mcp" in result.stdout and "1.30.0" in result.stdout
+    run_mock.assert_called_once_with(build_target, "requirements.txt", resolve_date=None)
+
+
+def test_build_forwards_resolve_date(build_target):
+    with patch("lynceus_sec.cli.build_mod.run_build", return_value=_build_result(build_target)) as run_mock:
+        result = runner.invoke(
+            app,
+            ["build", str(build_target), "--requirements", "requirements.txt", "--resolve-date", "2025-03-22", "--plain"],
+        )
+    assert result.exit_code == 0
+    run_mock.assert_called_once_with(build_target, "requirements.txt", resolve_date="2025-03-22")
+
+
+def test_build_plain_flag_has_no_ansi_or_emoji(build_target):
+    with patch("lynceus_sec.cli.build_mod.run_build", return_value=_build_result(build_target)):
+        result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
+    assert not _ANSI_RE.search(result.stdout)
+    assert not any(ch in result.stdout for ch in _EMOJI_CHARS)
+
+
+def test_build_help_lists_options():
+    result = runner.invoke(app, ["build", "--help"])
+    assert result.exit_code == 0
+    output = _strip_ansi(result.stdout)
+    for option in ("--requirements", "--resolve-date", "--plain"):
+        assert option in output
+
+
 # -- ayuda --------------------------------------------------------------------
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -403,6 +500,7 @@ def test_root_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "scan" in result.stdout
+    assert "build" in result.stdout
     assert "bench" in result.stdout
 
 

@@ -510,6 +510,37 @@ def render_metrics_table(
     console.print(table)
 
 
+def render_build_result(console: Console, result, *, plain: bool) -> None:
+    """Resultado de `lynceus build`: etiqueta de la imagen, fichero resuelto
+    y versión fijada de cada paquete. `result` viene de `validator.build`."""
+    if plain:
+        console.print(f"[tag] {result.tag}")
+        console.print(f"[resuelto] {result.resolved_path}")
+        if result.skipped_image_build:
+            console.print("[build] la imagen ya existía, no se reconstruye")
+        for name, ver in result.versions:
+            console.print(f"  {sanitize_untrusted(name)}=={sanitize_untrusted(ver)}")
+        return
+
+    title = Text(f"📦 Imagen objetivo: {result.tag}", style=f"bold {AMBER_BRIGHT}")
+    table = Table(title=title, border_style=AMBER, header_style=f"bold {GOLD}")
+    table.add_column("Paquete")
+    table.add_column("Versión")
+    for name, ver in result.versions:
+        table.add_row(Text(sanitize_untrusted(name)), Text(sanitize_untrusted(ver)))
+    console.print(table)
+    console.print()
+
+    note = Text()
+    note.append("📄 ", style=AMBER_BRIGHT)
+    note.append("Fichero resuelto: ", style=f"bold {GOLD}")
+    note.append(str(result.resolved_path), style=GOLD)
+    console.print(note)
+
+    if result.skipped_image_build:
+        console.print(Text("La imagen ya existía; no se reconstruye.", style=GOLD))
+
+
 def render_report_paths(console: Console, *, json_path: str | None, report_path: str | None, plain: bool) -> None:
     for label, path in (("JSON", json_path), ("HTML", report_path)):
         if path is None:

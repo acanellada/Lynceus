@@ -3,12 +3,16 @@
 Exit codes de `scan`: 0 sin hallazgos confirmados, 1 con hallazgos
 confirmados, 2 error (argumentos inválidos, carpeta/objetivo inválido, o
 fallo del entorno de validación).
+
+Exit codes de `build`: 0 imagen objetivo lista (nueva o reaprovechada), 2
+error (argumentos inválidos o fallo resolviendo/construyendo).
 """
 
 from __future__ import annotations
 
 import json as jsonlib
 import time
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -20,6 +24,7 @@ from lynceus_sec.cli_render import (
     ScanSummary,
     is_plain_mode,
     make_console,
+    render_build_result,
     render_capabilities,
     render_findings_table,
     render_fs_root,
@@ -35,6 +40,7 @@ from lynceus_sec.cli_render import (
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, Label
 from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
+from lynceus_sec.validator import build as build_mod
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
@@ -125,6 +131,32 @@ def _validate_pythonpaths(target: Path, pythonpaths: list[str], console) -> list
             console.print(f"Error: --pythonpath {raw!r} no es una carpeta dentro de {target}.")
             raise typer.Exit(2)
     return pythonpaths
+
+
+def _validate_requirements_path(target: Path, requirements: str, console) -> str:
+    """--requirements debe ser relativo a `target`, sin rutas absolutas ni
+    '..', y apuntar a un fichero existente dentro de la carpeta (mismo
+    patrón que --entry en `scan`)."""
+    req_path = Path(requirements)
+    if req_path.is_absolute() or ".." in req_path.parts:
+        console.print(f"Error: --requirements {requirements!r} debe ser relativo a la carpeta, sin rutas absolutas ni '..'.")
+        raise typer.Exit(2)
+    full_path = target / req_path
+    if not full_path.is_file():
+        console.print(f"Error: {target} no contiene el fichero de requisitos {requirements!r} (o no es un fichero).")
+        raise typer.Exit(2)
+    return requirements
+
+
+def _validate_resolve_date(value: str | None, console) -> str | None:
+    if value is None:
+        return None
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        console.print(f"Error: --resolve-date {value!r} debe tener el formato AAAA-MM-DD.")
+        raise typer.Exit(2)
+    return value
 
 
 def _serialize_capability_confirmation(confirmation: dict) -> dict:
@@ -341,6 +373,46 @@ def scan(
     )
 
     raise typer.Exit(1 if all_findings else 0)
+
+
+@app.command()
+def build(
+    target: Path = typer.Argument(  # noqa: B008 - patrón estándar de typer
+        ..., help="Carpeta del servidor objetivo (su código no se modifica)."
+    ),
+    requirements: str = typer.Option(
+        ..., "--requirements", help="Ruta relativa dentro de la carpeta al fichero de requisitos a resolver.",
+    ),
+    resolve_date: str | None = typer.Option(
+        None, "--resolve-date",
+        help="Fecha AAAA-MM-DD: excluye versiones publicadas después (uv --exclude-newer).",
+    ),
+    plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
+) -> None:
+    """Resuelve las dependencias de la carpeta objetivo en un contenedor aparte
+    y construye la imagen que las instala, sin tocar el entorno del harness."""
+    plain_mode = is_plain_mode(plain_flag=plain)
+    console = make_console(plain=plain_mode)
+    render_header(console, version=_lynceus_version(), plain=plain_mode)
+
+    if not target.is_dir():
+        console.print(f"Error: {target} no es una carpeta.")
+        raise typer.Exit(2)
+
+    requirements = _validate_requirements_path(target, requirements, console)
+    resolve_date = _validate_resolve_date(resolve_date, console)
+
+    try:
+        result = run_with_progress(
+            console, class_name="build", plain=plain_mode,
+            fn=lambda: build_mod.run_build(target, requirements, resolve_date=resolve_date),
+        )
+    except build_mod.BuildError as exc:
+        console.print(f"Error construyendo la imagen objetivo: {exc}")
+        raise typer.Exit(2)
+
+    render_build_result(console, result, plain=plain_mode)
+    raise typer.Exit(0)
 
 
 @app.command()
