@@ -11,8 +11,15 @@ Dos modos:
   - Si el intento no lleva `canary_content` (inyección de comandos/argumentos):
     se comprueba si el fichero `canary_path` existe tras la llamada.
   - Si lleva `canary_content` (path traversal): antes de arrancar el servidor
-    se escribe `canary_content` en `canary_path`, y se confirma solo si ese
-    contenido aparece en el texto de la respuesta (éxito o error).
+    se escribe `canary_content` en `canary_path` (creando el directorio padre
+    si falta), y se confirma solo si ese contenido aparece en el texto de la
+    respuesta (éxito o error). Si además lleva `symlink_path`/`symlink_target`,
+    se crea ese enlace simbólico antes de la llamada. Antes de arrancar
+    cualquier servidor también se crea `$HOME` si no existe. Toda ruta que se
+    vaya a crear (directorio, canario o enlace, y el destino del enlace) se
+    normaliza y se comprueba que cae bajo /tmp; si no, se rechaza sin crear
+    nada: defensa en profundidad, ya que el host nunca debería construir un
+    intento con una ruta fuera de /tmp, pero el harness no confía en ello.
   - Si lleva `calls` (SSRF, intentos en dos pasos): en vez de una única
     llamada a `tool`/`arguments`, ejecuta la lista de llamadas en orden
     dentro de la misma sesión del mismo servidor, y agrega el resultado
@@ -24,6 +31,7 @@ Dos modos:
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -38,6 +46,29 @@ _ENV_ERROR_MARKERS = (
     "not found",
     "modulenotfounderror",
 )
+
+_DEFAULT_HOME = "/tmp/lynceus-root"
+_ALLOWED_ROOT = "/tmp"
+
+
+def _ensure_under_tmp(path: str, *, what: str) -> Path:
+    """Normaliza `path` (sin tocar disco) y comprueba que cae bajo /tmp.
+
+    Defensa en profundidad: el host (payloads.py) nunca debería construir un
+    intento con una ruta fuera de /tmp, pero el harness no se fía de eso
+    antes de crear ningún directorio, fichero de canario o enlace simbólico.
+    Lanza ValueError sin crear nada si la ruta normalizada queda fuera.
+    """
+    normalized = Path(os.path.normpath(path))
+    if not str(normalized).startswith(_ALLOWED_ROOT + "/"):
+        raise ValueError(f"{what} fuera de {_ALLOWED_ROOT}, rechazado: {path!r}")
+    return normalized
+
+
+def _prepare_home() -> None:
+    """Crea $HOME (o el valor por defecto) si no existe, antes de arrancar cualquier servidor."""
+    home = _ensure_under_tmp(os.environ.get("HOME", _DEFAULT_HOME), what="HOME")
+    home.mkdir(parents=True, exist_ok=True)
 
 
 def _describe(exc: BaseException) -> str:
@@ -100,12 +131,24 @@ async def _list_tools(server_path: str) -> dict[str, Any]:
 
 
 async def _call_once(server_path: str, attempt: dict[str, Any]) -> tuple[bool, str]:
-    """Si procede, planta el canario de lectura; arranca un servidor nuevo y
-    ejecuta una única llamada (`tool`/`arguments`) o, si el intento lleva
-    `calls`, la secuencia completa en la misma sesión, y lo cierra."""
+    """Si procede, planta el canario de lectura y el enlace simbólico; arranca
+    un servidor nuevo y ejecuta una única llamada (`tool`/`arguments`) o, si
+    el intento lleva `calls`, la secuencia completa en la misma sesión, y lo
+    cierra."""
     canary_content = attempt.get("canary_content")
     if canary_content is not None:
-        Path(attempt["canary_path"]).write_text(canary_content)
+        canary_path = _ensure_under_tmp(attempt["canary_path"], what="canary_path")
+        canary_path.parent.mkdir(parents=True, exist_ok=True)
+        canary_path.write_text(canary_content)
+
+    symlink_path = attempt.get("symlink_path")
+    symlink_target = attempt.get("symlink_target")
+    if symlink_path is not None and symlink_target is not None:
+        link_path = _ensure_under_tmp(symlink_path, what="symlink_path")
+        link_target = _ensure_under_tmp(symlink_target, what="symlink_target")
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        if not link_path.is_symlink():
+            link_path.symlink_to(link_target)
 
     params = StdioServerParameters(command=sys.executable, args=[server_path])
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
@@ -184,6 +227,12 @@ def main() -> int:
     parser.add_argument("--attempts", default=None)
     parser.add_argument("--total-timeout", type=float, default=60.0)
     args = parser.parse_args()
+
+    try:
+        _prepare_home()
+    except Exception as exc:  # noqa: BLE001 - igual que el resto: se reporta como JSON, nunca se propaga
+        print(json.dumps({"error": _describe(exc)}))
+        return 1
 
     if args.mode == "validate":
         attempts = json.loads(args.attempts)

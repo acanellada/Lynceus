@@ -13,6 +13,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from lynceus_sec.validator.runner import DEFAULT_FS_ROOT
+
 _INNOCUOUS_PREFIX = "lynceus"
 
 _TEMPLATES: dict[str, str] = {
@@ -58,6 +60,11 @@ def build_payloads() -> list[Payload]:
 
 _TRAVERSAL_DEPTH = 8
 
+# Carpeta aparte, siempre fuera de cualquier límite (`fs_root`): nombre fijo,
+# conocido por el harness y por los tests; solo el contenido de cada canario
+# que se planta dentro es aleatorio.
+OUTSIDE_DIR = "/tmp/lynceus-outside"
+
 
 @dataclass(frozen=True)
 class PathPayload:
@@ -65,30 +72,79 @@ class PathPayload:
     canary_path: str
     canary_content: str
     value: str
+    symlink_path: str | None = None
+    symlink_target: str | None = None
 
 
-def build_path_traversal_payloads(depth: int = _TRAVERSAL_DEPTH) -> list[PathPayload]:
-    """Cargas fijas de path traversal, cada una con su propio canario de
-    lectura: nombre y contenido se generan por separado (independientes),
-    para que un servidor que repita la ruta en un mensaje de error no cuente
-    como fuga de contenido.
+def _sibling_dir(fs_root: str) -> str:
+    """Carpeta hermana del límite, con el mismo prefijo (p.ej. /tmp/lynceus-root-x
+    si el límite es /tmp/lynceus-root): detecta servidores que comprueban el
+    límite con un prefijo de cadena en vez de con contención real de rutas."""
+    return f"{fs_root.rstrip('/')}-x"
+
+
+def build_path_traversal_payloads(
+    fs_root: str = DEFAULT_FS_ROOT, depth: int = _TRAVERSAL_DEPTH
+) -> list[PathPayload]:
+    """Cargas de path traversal conscientes del límite (`fs_root`, el `HOME`
+    del servidor analizado). Tres canarios de lectura independientes (nombre
+    y contenido propios), siempre fuera del límite, en tres formas:
+
+    - una carpeta aparte (`OUTSIDE_DIR`), con dos cargas: ruta absoluta y
+      "../" repetido hasta ella (en variantes "bare" y con prefijo "./", por
+      si un filtro rechaza solo las rutas que empiezan literalmente por "..");
+    - una carpeta hermana del límite con el mismo prefijo (`_sibling_dir`),
+      con las mismas dos cargas "bare" (absoluta y "../" repetido);
+    - un enlace simbólico dentro del límite que apunta a la carpeta aparte,
+      con un tercer canario independiente solo alcanzable a través de él.
     """
     traversal_prefix = "../" * depth
     payloads: list[PathPayload] = []
-    for technique in ("absolute", "dotdot_bare", "dotdot_dotslash"):
-        canary_path = _random_canary_path()
-        canary_content = _random_canary_content()
-        relative_canary = canary_path.removeprefix("/")
-        if technique == "absolute":
-            value = canary_path
-        elif technique == "dotdot_bare":
-            value = f"{traversal_prefix}{relative_canary}"
-        else:
-            value = f"./{traversal_prefix}{relative_canary}"
-        payloads.append(
-            PathPayload(technique=technique, canary_path=canary_path, canary_content=canary_content, value=value)
+
+    outside_path = f"{OUTSIDE_DIR}/lynceus-canary-{uuid.uuid4().hex}"
+    outside_content = _random_canary_content()
+    outside_relative = f"{traversal_prefix}{outside_path.removeprefix('/')}"
+    payloads.append(PathPayload("absolute_outside", outside_path, outside_content, outside_path))
+    payloads.append(PathPayload("dotdot_outside", outside_path, outside_content, outside_relative))
+    payloads.append(PathPayload("dotslash_outside", outside_path, outside_content, f"./{outside_relative}"))
+
+    sibling_dir = _sibling_dir(fs_root)
+    sibling_path = f"{sibling_dir}/lynceus-canary-{uuid.uuid4().hex}"
+    sibling_content = _random_canary_content()
+    sibling_relative = f"{traversal_prefix}{sibling_path.removeprefix('/')}"
+    payloads.append(PathPayload("absolute_sibling", sibling_path, sibling_content, sibling_path))
+    payloads.append(PathPayload("dotdot_sibling", sibling_path, sibling_content, sibling_relative))
+
+    link_path = f"{fs_root.rstrip('/')}/lynceus-link-{uuid.uuid4().hex}"
+    link_canary_name = f"lynceus-canary-{uuid.uuid4().hex}"
+    link_canary_path = f"{OUTSIDE_DIR}/{link_canary_name}"
+    link_content = _random_canary_content()
+    payloads.append(
+        PathPayload(
+            "symlink", link_canary_path, link_content, f"{link_path}/{link_canary_name}",
+            symlink_path=link_path, symlink_target=OUTSIDE_DIR,
         )
+    )
+
     return payloads
+
+
+@dataclass(frozen=True)
+class PositiveControlPayload:
+    canary_path: str
+    canary_content: str
+    value: str
+
+
+def build_positive_control_payload(fs_root: str = DEFAULT_FS_ROOT) -> PositiveControlPayload:
+    """Un fichero dentro del límite, con contenido aleatorio: control positivo
+    informativo que comprueba si la misma tool/parámetro puede leer siquiera
+    un fichero normal. No es una carga de ataque y nunca produce un Finding;
+    solo da contexto a un resultado `not_confirmed` en las cargas de arriba.
+    """
+    path = f"{fs_root.rstrip('/')}/lynceus-positive-{uuid.uuid4().hex}"
+    content = _random_canary_content()
+    return PositiveControlPayload(canary_path=path, canary_content=content, value=path)
 
 
 @dataclass(frozen=True)

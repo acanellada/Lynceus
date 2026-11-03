@@ -15,6 +15,12 @@ RECEIVER_PATH = Path(__file__).resolve().with_name("receiver.py")
 DEFAULT_IMAGE = "lynceus-sandbox:0.1"
 SANDBOX_UID = 10001
 
+# Límite de sistema de ficheros por defecto para el servidor analizado: el
+# harness crea este directorio antes de arrancarlo (ver harness.py), y
+# `lynceus scan --fs-root` permite indicar otro (siempre bajo /tmp, que es lo
+# único escribible dentro del sandbox).
+DEFAULT_FS_ROOT = "/tmp/lynceus-root"
+
 # Script de una sola pieza, sin dependencias ajenas a la biblioteca estándar:
 # se ejecuta dentro de un contenedor efímero en la red interna para comprobar
 # que no hay salida real a internet (ni TCP directo ni resolución DNS) antes
@@ -53,7 +59,7 @@ def _image_exists(image: str) -> bool:
     return proc.returncode == 0
 
 
-def _security_flags(memory: str, cpus: str, pids_limit: int) -> list[str]:
+def _security_flags(memory: str, cpus: str, pids_limit: int, *, home: str = DEFAULT_FS_ROOT) -> list[str]:
     """Flags de endurecimiento comunes a servidor, receptor y comprobación de aislamiento."""
     return [
         "--read-only",
@@ -65,7 +71,7 @@ def _security_flags(memory: str, cpus: str, pids_limit: int) -> list[str]:
         "--memory-swap", memory,
         "--cpus", cpus,
         "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
-        "-e", "HOME=/tmp",
+        "-e", f"HOME={home}",
     ]
 
 
@@ -79,19 +85,24 @@ def build_docker_command(
     pids_limit: int = 64,
     container_name: str | None = None,
     network: str = "none",
+    fs_root: str = DEFAULT_FS_ROOT,
     extra_harness_args: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     """Construye el comando `docker run` del sandbox. No ejecuta nada.
 
     `network` solo cambia para los casos de SSRF (red interna); el resto de
-    clases siguen con el valor por defecto `"none"`.
+    clases siguen con el valor por defecto `"none"`. `fs_root` fija `HOME`
+    dentro del contenedor (único flag de endurecimiento que cambia): es el
+    límite de sistema de ficheros que el harness crea antes de arrancar el
+    servidor analizado, y el que usan los canarios de path traversal para
+    saber qué queda "fuera".
     """
     name = container_name or f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
     cmd = [
         "docker", "run", "--rm",
         "--name", name,
         "--network", network,
-        *_security_flags(memory, cpus, pids_limit),
+        *_security_flags(memory, cpus, pids_limit, home=fs_root),
         "-v", f"{Path(case_dir).resolve()}:/case:ro",
         "-v", f"{HARNESS_PATH}:/harness/harness.py:ro",
         image,
@@ -296,11 +307,12 @@ def run_harness(
     image: str = DEFAULT_IMAGE,
     timeout: float = 20.0,
     network: str = "none",
+    fs_root: str = DEFAULT_FS_ROOT,
     container_name: str | None = None,
 ) -> list[dict[str, Any]]:
     _check_docker_and_image(image)
     container_name, cmd = build_docker_command(
-        case_dir, image=image, timeout=timeout, network=network, container_name=container_name,
+        case_dir, image=image, timeout=timeout, network=network, fs_root=fs_root, container_name=container_name,
     )
     payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=timeout + 10)
     return parse_harness_output(payload)
@@ -314,6 +326,7 @@ def run_validate(
     call_timeout: float = 15.0,
     total_timeout: float | None = None,
     network: str = "none",
+    fs_root: str = DEFAULT_FS_ROOT,
     container_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Ejecuta `attempts` dentro del sandbox (un proceso de servidor nuevo por intento).
@@ -336,7 +349,7 @@ def run_validate(
         "--total-timeout", str(total_timeout),
     ]
     container_name, cmd = build_docker_command(
-        case_dir, image=image, timeout=call_timeout, network=network,
+        case_dir, image=image, timeout=call_timeout, network=network, fs_root=fs_root,
         container_name=container_name, extra_harness_args=extra_args,
     )
     payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=wall_clock_timeout)

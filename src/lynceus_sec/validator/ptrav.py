@@ -12,8 +12,16 @@ from pathlib import Path
 from typing import Any
 
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
-from lynceus_sec.validator.payloads import build_path_traversal_payloads
-from lynceus_sec.validator.runner import DEFAULT_IMAGE, run_harness, run_validate
+from lynceus_sec.validator.payloads import (
+    build_path_traversal_payloads,
+    build_positive_control_payload,
+)
+from lynceus_sec.validator.runner import (
+    DEFAULT_FS_ROOT,
+    DEFAULT_IMAGE,
+    run_harness,
+    run_validate,
+)
 
 _NEUTRAL_BY_TYPE: dict[str, Any] = {
     "string": "lynceus",
@@ -51,17 +59,20 @@ def _base_arguments(tool: dict[str, Any], *, skip: str) -> dict[str, Any]:
     }
 
 
-def build_attempts(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Un intento por cada (parámetro de tipo string, carga) de cada tool."""
+def build_attempts(tools: list[dict[str, Any]], fs_root: str = DEFAULT_FS_ROOT) -> list[dict[str, Any]]:
+    """Un intento por cada (parámetro de tipo string, carga) de cada tool, más
+    un intento de control positivo informativo por cada (tool, parámetro):
+    ver `kind` en cada intento ("traversal" o "positive_control")."""
     attempts: list[dict[str, Any]] = []
     for tool in tools:
         for param in _string_params(tool):
-            for payload in build_path_traversal_payloads():
+            for payload in build_path_traversal_payloads(fs_root):
                 arguments = _base_arguments(tool, skip=param)
                 arguments[param] = payload.value
                 attempts.append(
                     {
                         "id": uuid.uuid4().hex,
+                        "kind": "traversal",
                         "tool": tool["name"],
                         "parameter": param,
                         "technique": payload.technique,
@@ -70,8 +81,28 @@ def build_attempts(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "canary_content": payload.canary_content,
                         "environment_markers": _ENVIRONMENT_MARKERS,
                         "arguments": arguments,
+                        "symlink_path": payload.symlink_path,
+                        "symlink_target": payload.symlink_target,
                     }
                 )
+
+            control = build_positive_control_payload(fs_root)
+            control_arguments = _base_arguments(tool, skip=param)
+            control_arguments[param] = control.value
+            attempts.append(
+                {
+                    "id": uuid.uuid4().hex,
+                    "kind": "positive_control",
+                    "tool": tool["name"],
+                    "parameter": param,
+                    "technique": "positive_control",
+                    "payload": control.value,
+                    "canary_path": control.canary_path,
+                    "canary_content": control.canary_content,
+                    "environment_markers": _ENVIRONMENT_MARKERS,
+                    "arguments": control_arguments,
+                }
+            )
     return attempts
 
 
@@ -79,14 +110,29 @@ def attempts_to_findings(
     case_id: str,
     attempts: list[dict[str, Any]],
     results: list[dict[str, Any]],
-) -> tuple[list[Finding], list[dict[str, Any]]]:
-    """Solo los intentos `confirmed` producen Findings. Los `inconclusive` se devuelven aparte."""
+) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Solo los intentos `confirmed` de tipo `traversal` producen Findings; los
+    `inconclusive` se devuelven aparte. Los intentos `positive_control` nunca
+    producen Finding ni cuentan como inconclusos: se devuelven en una tercera
+    lista, con su resultado tal cual, puramente informativa."""
     results_by_id = {result["id"]: result for result in results}
     findings: list[Finding] = []
     inconclusive: list[dict[str, Any]] = []
+    positive_controls: list[dict[str, Any]] = []
 
     for attempt in attempts:
+        kind = attempt.get("kind", "traversal")
         result = results_by_id.get(attempt["id"])
+
+        if kind == "positive_control":
+            if result is None:
+                positive_controls.append(
+                    {**attempt, "status": "inconclusive", "detail": "sin resultado del harness"}
+                )
+            else:
+                positive_controls.append({**attempt, **result})
+            continue
+
         if result is None:
             inconclusive.append({**attempt, "status": "inconclusive", "detail": "sin resultado del harness"})
             continue
@@ -117,7 +163,7 @@ def attempts_to_findings(
             inconclusive.append({**attempt, **result})
         # not_confirmed: resultado negativo normal, ni Finding ni informe aparte
 
-    return findings, inconclusive
+    return findings, inconclusive, positive_controls
 
 
 def validate_case(
@@ -126,12 +172,13 @@ def validate_case(
     image: str = DEFAULT_IMAGE,
     discover_timeout: float = 20.0,
     call_timeout: float = 15.0,
-) -> tuple[list[Finding], list[dict[str, Any]]]:
+    fs_root: str = DEFAULT_FS_ROOT,
+) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
     case_id = Path(case_dir).name
-    tools = run_harness(case_dir, image=image, timeout=discover_timeout)
-    attempts = build_attempts(tools)
+    tools = run_harness(case_dir, image=image, timeout=discover_timeout, fs_root=fs_root)
+    attempts = build_attempts(tools, fs_root)
     if not attempts:
-        return [], []
+        return [], [], []
 
-    results = run_validate(case_dir, attempts, image=image, call_timeout=call_timeout)
+    results = run_validate(case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root)
     return attempts_to_findings(case_id, attempts, results)

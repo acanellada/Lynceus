@@ -101,6 +101,21 @@ def render_header(console: Console, *, version: str, plain: bool) -> None:
     console.print()
 
 
+def render_fs_root(console: Console, fs_root: str, *, plain: bool) -> None:
+    """Línea informativa (solo cuando se valida path traversal) con el
+    límite de sistema de ficheros usado: el `HOME` del servidor analizado y
+    la referencia frente a la que se decide qué queda "fuera" en los
+    canarios de lectura."""
+    if plain:
+        console.print(f"[fs-root] limite de sistema de ficheros: {fs_root}")
+        return
+    text = Text()
+    text.append("📁 ", style=AMBER_BRIGHT)
+    text.append("Límite de sistema de ficheros: ", style=f"bold {GOLD}")
+    text.append(fs_root, style=GOLD)
+    console.print(text)
+
+
 def render_sandbox_status(console: Console, *, class_name: str, network: str, plain: bool) -> None:
     label = CLASS_LABELS.get(class_name, class_name)
     isolation = "red interna aislada (sin salida real)" if network != "none" else "sin red"
@@ -292,6 +307,46 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
                 Text(sanitize_untrusted(str(item.get("parameter")))),
                 Text(sanitize_untrusted(str(item.get("technique")))),
                 Text(sanitize_untrusted(str(item.get("detail") or item.get("status")))),
+            )
+    console.print(table)
+
+
+def render_positive_controls(console: Console, positive_controls_by_class: dict[str, list[dict]], *, plain: bool) -> None:
+    """Control positivo informativo de path traversal: ¿puede la misma
+    tool/parámetro leer siquiera un fichero normal dentro del límite? No
+    cambia la clasificación de ninguna vulnerabilidad ni el resumen final."""
+    total = sum(len(items) for items in positive_controls_by_class.values())
+    if total == 0:
+        return
+    if plain:
+        console.print(f"{count_phrase(total, 'control positivo', 'controles positivos')} (informativo):")
+        for class_name, items in positive_controls_by_class.items():
+            class_label = CLASS_LABELS.get(class_name, class_name)
+            for item in items:
+                console.print(
+                    f"  - clase={class_label} tool={sanitize_untrusted(item.get('tool'))} "
+                    f"parametro={sanitize_untrusted(item.get('parameter'))} "
+                    f"estado={sanitize_untrusted(item.get('status'))}"
+                )
+        return
+
+    title = Text(
+        f"🧭 {count_phrase(total, 'control positivo', 'controles positivos')} (informativo)",
+        style=f"bold {GOLD}",
+    )
+    table = Table(title=title, border_style=GOLD, header_style=f"bold {GOLD}")
+    table.add_column("Clase")
+    table.add_column("Herramienta")
+    table.add_column("Parámetro")
+    table.add_column("Estado")
+    for class_name, items in positive_controls_by_class.items():
+        class_label = CLASS_LABELS.get(class_name, class_name)
+        for item in items:
+            table.add_row(
+                Text(class_label),
+                Text(sanitize_untrusted(str(item.get("tool")))),
+                Text(sanitize_untrusted(str(item.get("parameter")))),
+                Text(sanitize_untrusted(str(item.get("status")))),
             )
     console.print(table)
 

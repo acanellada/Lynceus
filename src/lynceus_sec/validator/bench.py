@@ -92,7 +92,10 @@ def run_class_benchmark(
         if on_case_start is not None:
             on_case_start(case_id)
         try:
-            findings, inconclusive = validate_case(case_dir)
+            # path_traversal devuelve un tercer elemento (controles positivos,
+            # informativos) que bench no usa para las métricas; se ignora.
+            result = validate_case(case_dir)
+            findings, inconclusive = result[0], result[1]
         except RunnerError as exc:
             result = CaseResult(case_id=case_id, error=str(exc))
             case_results.append(result)

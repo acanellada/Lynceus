@@ -21,9 +21,11 @@ from lynceus_sec.cli_render import (
     is_plain_mode,
     make_console,
     render_findings_table,
+    render_fs_root,
     render_header,
     render_inconclusive,
     render_metrics_table,
+    render_positive_controls,
     render_report_paths,
     render_sandbox_status,
     render_summary,
@@ -37,7 +39,7 @@ from lynceus_sec.validator.bench import (
     run_class_benchmark,
     validate_case_for,
 )
-from lynceus_sec.validator.runner import RunnerError
+from lynceus_sec.validator.runner import DEFAULT_FS_ROOT, RunnerError
 
 app = typer.Typer(
     name="lynceus",
@@ -71,12 +73,34 @@ def _network_for(class_name: str) -> str:
     return "internal" if class_name == "ssrf" else "none"
 
 
+def _validate_fs_root(value: str, console) -> str:
+    """--fs-root debe ser una ruta absoluta bajo /tmp (el resto del sistema de
+    ficheros del sandbox es de solo lectura), sin componentes ".." y distinta
+    de /tmp mismo (ahí viven la carpeta aparte y la carpeta hermana de los
+    canarios, y el límite necesita ser una subcarpeta propia)."""
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        console.print(f"Error: --fs-root {value!r} debe ser una ruta absoluta, sin componentes '..'.")
+        raise typer.Exit(2)
+    try:
+        path.relative_to("/tmp")
+    except ValueError:
+        console.print(f"Error: --fs-root {value!r} debe estar bajo /tmp (el resto del sandbox es de solo lectura).")
+        raise typer.Exit(2)
+    if path == Path("/tmp"):
+        console.print("Error: --fs-root no puede ser /tmp mismo; usa una subcarpeta, p.ej. /tmp/mi-limite.")
+        raise typer.Exit(2)
+    return str(path)
+
+
 def _build_json_payload(
     *,
     target: str,
     classes: list[str],
+    fs_root: str,
     findings: list[Finding],
     inconclusive_by_class: dict[str, list[dict]],
+    positive_controls_by_class: dict[str, list[dict]],
     elapsed_seconds: float,
     environment,
 ) -> dict:
@@ -85,6 +109,7 @@ def _build_json_payload(
         "schema_version": 1,
         "target": target,
         "classes": classes,
+        "fs_root": fs_root,
         "summary": {
             "vulnerabilities_confirmed": len(groups),
             "techniques_confirmed": len(findings),
@@ -113,6 +138,7 @@ def _build_json_payload(
             for g in groups
         ],
         "inconclusive": inconclusive_by_class,
+        "positive_controls": positive_controls_by_class,
         "environment": {
             "lynceus_version": environment.lynceus_version,
             "sandbox_image": environment.sandbox_image,
@@ -134,6 +160,11 @@ def scan(
     ),
     json_path: Path | None = typer.Option(None, "--json", help="Ruta donde escribir el informe JSON."),  # noqa: B008
     report_path: Path | None = typer.Option(None, "--report", help="Ruta donde escribir el informe HTML."),  # noqa: B008
+    fs_root: str = typer.Option(
+        DEFAULT_FS_ROOT, "--fs-root",
+        help="Límite de sistema de ficheros del servidor analizado (HOME dentro del sandbox); "
+        "ruta absoluta bajo /tmp.",
+    ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
     """Valida dinámicamente una carpeta con server.py frente a las clases indicadas."""
@@ -142,6 +173,7 @@ def scan(
     render_header(console, version=_lynceus_version(), plain=plain_mode)
 
     normalized_classes = _normalize_classes(classes, console)
+    fs_root = _validate_fs_root(fs_root, console)
 
     if not target.is_dir():
         console.print(f"Error: {target} no es una carpeta.")
@@ -150,9 +182,13 @@ def scan(
         console.print(f"Error: {target} no contiene server.py.")
         raise typer.Exit(2)
 
+    if "path_traversal" in normalized_classes:
+        render_fs_root(console, fs_root, plain=plain_mode)
+
     start = time.monotonic()
     all_findings: list[Finding] = []
     inconclusive_by_class: dict[str, list[dict]] = {}
+    positive_controls_by_class: dict[str, list[dict]] = {}
     had_error = False
 
     for class_name in normalized_classes:
@@ -160,18 +196,28 @@ def scan(
         validate_case = validate_case_for(vuln_class)
         render_sandbox_status(console, class_name=class_name, network=_network_for(class_name), plain=plain_mode)
         try:
-            findings, inconclusive = run_with_progress(
-                console, class_name=class_name, plain=plain_mode,
-                fn=lambda validate_case=validate_case: validate_case(target),
-            )
+            if class_name == "path_traversal":
+                result = run_with_progress(
+                    console, class_name=class_name, plain=plain_mode,
+                    fn=lambda validate_case=validate_case: validate_case(target, fs_root=fs_root),
+                )
+            else:
+                result = run_with_progress(
+                    console, class_name=class_name, plain=plain_mode,
+                    fn=lambda validate_case=validate_case: validate_case(target),
+                )
         except RunnerError as exc:
             label = CLASS_LABELS.get(class_name, class_name)
             console.print(f"Error ejecutando la validación de {label}: {exc}")
             had_error = True
             continue
+        findings, inconclusive, *rest = result
+        positive_controls = rest[0] if rest else []
         all_findings.extend(findings)
         if inconclusive:
             inconclusive_by_class[class_name] = inconclusive
+        if positive_controls:
+            positive_controls_by_class[class_name] = positive_controls
 
     elapsed = time.monotonic() - start
 
@@ -180,6 +226,7 @@ def scan(
 
     render_findings_table(console, all_findings, plain=plain_mode)
     render_inconclusive(console, inconclusive_by_class, plain=plain_mode)
+    render_positive_controls(console, positive_controls_by_class, plain=plain_mode)
 
     summary = ScanSummary(
         vulnerabilities=len(group_findings(all_findings)),
@@ -193,15 +240,17 @@ def scan(
 
     if json_path is not None:
         payload = _build_json_payload(
-            target=str(target), classes=normalized_classes, findings=all_findings,
-            inconclusive_by_class=inconclusive_by_class, elapsed_seconds=elapsed, environment=environment,
+            target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
+            inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
+            elapsed_seconds=elapsed, environment=environment,
         )
         json_path.write_text(jsonlib.dumps(payload, indent=2, ensure_ascii=False))
 
     if report_path is not None:
         html_text = build_html_report(
-            target=str(target), classes=normalized_classes, findings=all_findings,
-            inconclusive_by_class=inconclusive_by_class, elapsed_seconds=elapsed, environment=environment,
+            target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
+            inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
+            elapsed_seconds=elapsed, environment=environment,
         )
         report_path.write_text(html_text)
 

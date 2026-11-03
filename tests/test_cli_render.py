@@ -6,7 +6,9 @@ from lynceus_sec.cli_render import (
     ScanSummary,
     is_plain_mode,
     render_findings_table,
+    render_fs_root,
     render_inconclusive,
+    render_positive_controls,
     render_summary,
     sanitize_untrusted,
 )
@@ -204,3 +206,33 @@ def test_render_inconclusive_rich_title_uses_plural_for_many():
     out = console.export_text()
 
     assert "2 intentos inconclusos" in out
+
+
+def test_render_fs_root_plain_shows_the_limit(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+
+    render_fs_root(console, "/tmp/lynceus-root", plain=True)
+    out = capsys.readouterr().out
+
+    assert "/tmp/lynceus-root" in out
+
+
+def test_render_positive_controls_is_silent_when_empty(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+
+    render_positive_controls(console, {}, plain=True)
+    out = capsys.readouterr().out
+
+    assert out == ""
+
+
+def test_render_positive_controls_plain_shows_status_per_item(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    positive_controls = {"path_traversal": [{"tool": "read_doc", "parameter": "name", "status": "confirmed"}]}
+
+    render_positive_controls(console, positive_controls, plain=True)
+    out = capsys.readouterr().out
+
+    assert "1 control positivo" in out
+    assert "read_doc" in out
+    assert "confirmed" in out

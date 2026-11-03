@@ -90,6 +90,54 @@ def test_scan_exit_code_2_on_runner_error(case_dir):
     assert "docker no disponible" in result.stdout
 
 
+# -- --fs-root --------------------------------------------------------------
+
+def test_scan_fs_root_rejects_relative_path(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--fs-root", "tmp/relativo", "--plain"])
+    assert result.exit_code == 2
+    assert "--fs-root" in result.stdout
+
+
+def test_scan_fs_root_rejects_path_outside_tmp(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--fs-root", "/var/lynceus-root", "--plain"])
+    assert result.exit_code == 2
+    assert "/tmp" in result.stdout
+
+
+def test_scan_fs_root_rejects_tmp_itself(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--fs-root", "/tmp", "--plain"])
+    assert result.exit_code == 2
+
+
+def test_scan_fs_root_rejects_dotdot_escape(case_dir):
+    result = runner.invoke(app, ["scan", str(case_dir), "--fs-root", "/tmp/../etc", "--plain"])
+    assert result.exit_code == 2
+
+
+def test_scan_fs_root_valid_value_is_passed_to_ptrav_validate_case(case_dir):
+    with patch("lynceus_sec.validator.cmdi.validate_case", return_value=([], [])), \
+         patch("lynceus_sec.validator.ptrav.validate_case", return_value=([], [])) as ptrav_mock, \
+         patch("lynceus_sec.validator.ssrf.validate_case", return_value=([], [])):
+        result = runner.invoke(
+            app,
+            ["scan", str(case_dir), "--classes", "path_traversal", "--fs-root", "/tmp/mi-limite", "--plain"],
+        )
+
+    assert result.exit_code == 0
+    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/mi-limite")
+    assert "/tmp/mi-limite" in result.stdout
+
+
+def test_scan_fs_root_defaults_to_lynceus_root(case_dir):
+    with patch("lynceus_sec.validator.cmdi.validate_case", return_value=([], [])), \
+         patch("lynceus_sec.validator.ptrav.validate_case", return_value=([], [])) as ptrav_mock, \
+         patch("lynceus_sec.validator.ssrf.validate_case", return_value=([], [])):
+        result = runner.invoke(app, ["scan", str(case_dir), "--classes", "path_traversal", "--plain"])
+
+    assert result.exit_code == 0
+    ptrav_mock.assert_called_once_with(case_dir, fs_root="/tmp/lynceus-root")
+
+
 # -- --classes filtra qué validadores se llaman ---------------------------
 
 def test_scan_classes_option_only_runs_selected_class(case_dir):
@@ -192,6 +240,26 @@ def test_scan_json_malicious_tool_name_does_not_merge_attribution(case_dir, tmp_
     assert tools == {"read_file", "read_file' de la tool 'other_tool"}
 
 
+def test_scan_json_includes_fs_root_and_positive_controls_without_affecting_classification(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    positive_control = {"tool": "read_doc", "parameter": "name", "status": "confirmed"}
+    ptrav_result = ([], [], [positive_control])
+    with _patched_validators(ptrav_result=ptrav_result):
+        result = runner.invoke(
+            app,
+            [
+                "scan", str(case_dir), "--plain", "--classes", "path_traversal",
+                "--fs-root", "/tmp/mi-limite", "--json", str(json_path),
+            ],
+        )
+    assert result.exit_code == 0
+    payload = json.loads(json_path.read_text())
+
+    assert payload["fs_root"] == "/tmp/mi-limite"
+    assert payload["summary"]["vulnerabilities_confirmed"] == 0
+    assert payload["positive_controls"]["path_traversal"] == [positive_control]
+
+
 def test_scan_html_report_is_written(case_dir, tmp_path):
     report_path = tmp_path / "out.html"
     with _patched_validators():
@@ -225,7 +293,7 @@ def test_scan_help_lists_options():
     result = runner.invoke(app, ["scan", "--help"])
     assert result.exit_code == 0
     output = _strip_ansi(result.stdout)
-    for option in ("--classes", "--json", "--report", "--plain"):
+    for option in ("--classes", "--json", "--report", "--fs-root", "--plain"):
         assert option in output
 
 

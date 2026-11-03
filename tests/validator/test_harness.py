@@ -1,6 +1,12 @@
+import os
+
+import pytest
+
 from lynceus_sec.validator.harness import (
     _classify_attempt,
+    _ensure_under_tmp,
     _looks_like_environment_error,
+    _prepare_home,
 )
 
 
@@ -103,3 +109,40 @@ def test_ptrav_other_tool_error_is_not_confirmed():
     )
 
     assert result == {"id": "b5", "status": "not_confirmed", "detail": detail}
+
+
+# --- Defensa en profundidad: ninguna ruta fuera de /tmp, nunca se crea nada ---
+
+
+def test_ensure_under_tmp_accepts_a_path_under_tmp():
+    assert str(_ensure_under_tmp("/tmp/lynceus-root/escape", what="x")) == "/tmp/lynceus-root/escape"
+
+
+def test_ensure_under_tmp_rejects_a_path_outside_tmp():
+    with pytest.raises(ValueError, match="fuera de /tmp"):
+        _ensure_under_tmp("/etc/passwd", what="canary_path")
+
+
+def test_ensure_under_tmp_rejects_tmp_itself():
+    with pytest.raises(ValueError, match="fuera de /tmp"):
+        _ensure_under_tmp("/tmp", what="symlink_target")
+
+
+def test_ensure_under_tmp_rejects_a_dotdot_escape_after_normalizing():
+    with pytest.raises(ValueError, match="fuera de /tmp"):
+        _ensure_under_tmp("/tmp/../etc/passwd", what="symlink_path")
+
+
+def test_ensure_under_tmp_accepts_a_dotdot_that_stays_under_tmp_after_normalizing():
+    result = _ensure_under_tmp("/tmp/a/../b", what="x")
+
+    assert str(result) == "/tmp/b"
+
+
+def test_prepare_home_rejects_a_home_outside_tmp_without_creating_it(monkeypatch):
+    monkeypatch.setenv("HOME", "/etc/evil")
+
+    with pytest.raises(ValueError, match="fuera de /tmp"):
+        _prepare_home()
+
+    assert not os.path.exists("/etc/evil")

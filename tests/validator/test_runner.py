@@ -42,11 +42,25 @@ def test_tmpfs_is_rw_noexec_nosuid_nodev_with_size_limit():
     assert cmd[idx + 1] == "/tmp:rw,noexec,nosuid,nodev,size=16m"
 
 
-def test_home_env_set_to_tmp():
+def test_home_env_defaults_to_lynceus_root():
     _, cmd = build_docker_command(CASE_DIR)
 
     idx = cmd.index("-e")
-    assert cmd[idx + 1] == "HOME=/tmp"
+    assert cmd[idx + 1] == "HOME=/tmp/lynceus-root"
+
+
+def test_fs_root_overrides_home_env_and_keeps_rest_of_protections():
+    _, cmd = build_docker_command(CASE_DIR, fs_root="/tmp/mi-limite")
+
+    idx = cmd.index("-e")
+    assert cmd[idx + 1] == "HOME=/tmp/mi-limite"
+    assert "--read-only" in cmd
+    assert "--cap-drop" in cmd and "ALL" in cmd
+    assert "--security-opt" in cmd and "no-new-privileges" in cmd
+    assert "--pids-limit" in cmd
+    assert "--memory" in cmd
+    assert "--cpus" in cmd
+    assert "--user" in cmd and f"{runner.SANDBOX_UID}:{runner.SANDBOX_UID}" in cmd
 
 
 def test_container_name_changes_between_calls():

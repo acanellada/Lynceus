@@ -176,6 +176,25 @@ def _inconclusive_rows(inconclusive_by_class: dict[str, list[dict]]) -> str:
     return "".join(rows)
 
 
+def _positive_control_rows(positive_controls_by_class: dict[str, list[dict]]) -> str:
+    """Control positivo informativo de path traversal: no cambia la
+    clasificación de ninguna vulnerabilidad, solo da contexto."""
+    all_items = [(class_name, item) for class_name, items in positive_controls_by_class.items() for item in items]
+    if not all_items:
+        return '<tr><td colspan="4" class="muted">Sin controles positivos.</td></tr>'
+    rows = []
+    for class_name, item in all_items:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(CLASS_LABELS.get(class_name, class_name))}</td>"
+            f"<td class=\"mono\">{html.escape(str(item.get('tool', '')))}</td>"
+            f"<td class=\"mono\">{html.escape(str(item.get('parameter', '')))}</td>"
+            f"<td>{html.escape(str(item.get('status', '')))}</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
 def _environment_block(environment: EnvironmentInfo) -> str:
     def row(label: str, value: str | None, *, declared: bool = False) -> str:
         shown = value if value is not None else "desconocido"
@@ -198,8 +217,10 @@ def build_html_report(
     *,
     target: str,
     classes: list[str],
+    fs_root: str,
     findings: list[Finding],
     inconclusive_by_class: dict[str, list[dict]],
+    positive_controls_by_class: dict[str, list[dict]],
     elapsed_seconds: float,
     environment: EnvironmentInfo,
 ) -> str:
@@ -232,6 +253,7 @@ def build_html_report(
   <section class="summary">
     <p>{_badge(status)} &nbsp; objetivo: <span class="mono">{html.escape(target)}</span></p>
     <p>Clases analizadas: {html.escape(", ".join(CLASS_LABELS.get(c, c) for c in classes))}</p>
+    <p>Límite de sistema de ficheros (path traversal): <span class="mono">{html.escape(fs_root)}</span></p>
     <p>{vuln_phrase} ({techniques_phrase})
        &middot; {inconclusive_phrase}
        &middot; Tiempo total: <strong>{elapsed_seconds:.1f}s</strong></p>
@@ -255,6 +277,16 @@ def build_html_report(
     <table>
       <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th><th>Técnica</th><th>Detalle</th></tr></thead>
       <tbody>{_inconclusive_rows(inconclusive_by_class)}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>🧭 Controles positivos (informativo)</h2>
+    <p class="muted">¿Puede la misma tool/parámetro leer siquiera un fichero normal dentro del
+       límite? No cambia la clasificación de ninguna vulnerabilidad.</p>
+    <table>
+      <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th><th>Estado</th></tr></thead>
+      <tbody>{_positive_control_rows(positive_controls_by_class)}</tbody>
     </table>
   </section>
 
