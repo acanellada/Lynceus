@@ -563,6 +563,21 @@ def test_build_exit_code_2_with_distinct_message_when_docker_is_not_responding(b
     assert "Docker no responde" in result.stdout
 
 
+def test_build_plain_shows_version_fallback_warning(build_target):
+    result_with_warning = build_mod.BuildResult(
+        tag="lynceus-target:abc123def456",
+        resolved_path=build_target.parent / "cache" / "requirements.resolved.txt",
+        cache_dir=build_target.parent / "cache",
+        versions=[("mcp", "1.30.0")],
+        skipped_image_build=False,
+        warnings=["pyproject.toml no fija una versión estática de 'mcp-server-fetch'"],
+    )
+    with patch("lynceus_sec.cli.build_mod.run_build", return_value=result_with_warning):
+        result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])
+    assert result.exit_code == 0
+    assert "mcp-server-fetch" in result.stdout
+
+
 def test_build_exit_code_0_and_renders_tag_and_versions(build_target):
     with patch("lynceus_sec.cli.build_mod.run_build", return_value=_build_result(build_target)) as run_mock:
         result = runner.invoke(app, ["build", str(build_target), "--requirements", "requirements.txt", "--plain"])

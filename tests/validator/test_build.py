@@ -223,6 +223,162 @@ def test_render_target_dockerfile_contains_base_image_and_hardening():
     assert text.strip().endswith("USER sandbox")
 
 
+def test_render_target_dockerfile_without_dist_info_has_no_extra_copy():
+    text = build.render_target_dockerfile("lynceus-sandbox:0.1")
+
+    assert "dist-info" not in text
+    assert "chown -R sandbox:sandbox /opt/target" in text
+
+
+def test_render_target_dockerfile_copies_dist_info_to_venv_site_packages():
+    text = build.render_target_dockerfile(
+        "lynceus-sandbox:0.1", dist_info_dirname="mcp_server_fetch-2026.10.10.dist-info",
+    )
+
+    assert (
+        "COPY dist-info/mcp_server_fetch-2026.10.10.dist-info/ "
+        "/opt/target/lib/python3.12/site-packages/mcp_server_fetch-2026.10.10.dist-info/"
+    ) in text
+    # La copia de metadatos va antes del chown final, para que quede con el propietario correcto.
+    assert text.index("COPY dist-info/") < text.index("chown -R sandbox:sandbox /opt/target")
+
+
+# --- metadatos estáticos de pyproject.toml (sin instalar el proyecto) -------
+
+def test_read_pyproject_metadata_reads_static_name_and_version(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'mcp-server-fetch'\nversion = '2026.10.10'\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.name == "mcp-server-fetch"
+    assert metadata.version == "2026.10.10"
+    assert metadata.version_is_fallback is False
+
+
+def test_read_pyproject_metadata_falls_back_when_version_is_dynamic(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'mcp-server-fetch'\ndynamic = ['version']\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.name == "mcp-server-fetch"
+    assert metadata.version == build._FALLBACK_VERSION
+    assert metadata.version_is_fallback is True
+
+
+def test_read_pyproject_metadata_falls_back_when_version_is_missing(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'mcp-server-fetch'\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.version == build._FALLBACK_VERSION
+    assert metadata.version_is_fallback is True
+
+
+def test_read_pyproject_metadata_raises_clear_error_when_name_is_missing(tmp_path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nversion = '1.0.0'\n")
+
+    with pytest.raises(build.BuildError, match="\\[project\\].name"):
+        build.read_pyproject_metadata(pyproject)
+
+
+# --- nombre/versión no confiables: validados contra PEP 508/440 antes de ---
+# --- usarse en una ruta o en una línea COPY del Dockerfile -----------------
+
+@pytest.mark.parametrize("malicious_name", ["../../etc/passwd", "a/b", "evil\nRUN whoami", "..", "-leading-dash"])
+def test_read_pyproject_metadata_rejects_name_that_is_not_pep508(tmp_path, malicious_name):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[project]\nname = {malicious_name!r}\nversion = '1.0.0'\n")
+
+    with pytest.raises(build.BuildError, match="PEP 508"):
+        build.read_pyproject_metadata(pyproject)
+
+
+@pytest.mark.parametrize("valid_name", ["mcp-server-fetch", "mcp_server.fetch", "a", "A1"])
+def test_read_pyproject_metadata_accepts_pep508_names(tmp_path, valid_name):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[project]\nname = {valid_name!r}\nversion = '1.0.0'\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.name == valid_name
+
+
+@pytest.mark.parametrize(
+    "valid_version",
+    ["1.0.0", "2026.10.10", "1.0a1", "1.0.post1", "1.0.dev0", "1!1.0", "1.0+local.123"],
+)
+def test_read_pyproject_metadata_accepts_pep440_versions(tmp_path, valid_version):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[project]\nname = 'pkg'\nversion = {valid_version!r}\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.version == valid_version
+    assert metadata.version_is_fallback is False
+
+
+@pytest.mark.parametrize(
+    "malicious_version",
+    ["1.0\nRUN rm -rf /", "1.0; rm -rf /", "1.0/../../etc", "not-a-version"],
+)
+def test_read_pyproject_metadata_falls_back_when_version_is_not_pep440(tmp_path, malicious_version):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(f"[project]\nname = 'pkg'\nversion = {malicious_version!r}\n")
+
+    metadata = build.read_pyproject_metadata(pyproject)
+
+    assert metadata.version == build._FALLBACK_VERSION
+    assert metadata.version_is_fallback is True
+
+
+def test_read_pyproject_metadata_rejects_name_with_trailing_newline():
+    """`$` sin `fullmatch` da por válido un salto de línea final; con
+    `fullmatch` (lo que usa `read_pyproject_metadata`) no."""
+    assert build._PROJECT_NAME_RE.fullmatch("pkg\n") is None
+    assert build._PEP440_VERSION_RE.fullmatch("1.0\n") is None
+
+
+def test_compute_dist_info_dirname_escapes_name_and_version():
+    metadata = build.ProjectMetadata(name="mcp-server-fetch", version="2026.10.10", version_is_fallback=False)
+
+    assert build.compute_dist_info_dirname(metadata) == "mcp_server_fetch-2026.10.10.dist-info"
+
+
+def test_compute_dist_info_dirname_escapes_fallback_version_plus_sign():
+    metadata = build.ProjectMetadata(name="pkg", version="0.0.0+lynceus", version_is_fallback=True)
+
+    assert build.compute_dist_info_dirname(metadata) == "pkg-0.0.0_lynceus.dist-info"
+
+
+def test_render_dist_info_contents_has_only_minimal_metadata_and_installer():
+    metadata = build.ProjectMetadata(name="mcp-server-fetch", version="2026.10.10", version_is_fallback=False)
+
+    contents = build.render_dist_info_contents(metadata)
+
+    assert set(contents) == {
+        "mcp_server_fetch-2026.10.10.dist-info/METADATA",
+        "mcp_server_fetch-2026.10.10.dist-info/INSTALLER",
+    }
+    metadata_text = contents["mcp_server_fetch-2026.10.10.dist-info/METADATA"]
+    assert "Name: mcp-server-fetch" in metadata_text
+    assert "Version: 2026.10.10" in metadata_text
+    assert contents["mcp_server_fetch-2026.10.10.dist-info/INSTALLER"] == "lynceus\n"
+    assert "entry_points" not in metadata_text.lower()
+
+
+def test_write_dist_info_contents_writes_files_under_staging_dirname(tmp_path):
+    contents = {"pkg-1.0.dist-info/METADATA": "Name: pkg\nVersion: 1.0\n"}
+
+    build.write_dist_info_contents(tmp_path, contents)
+
+    written = tmp_path / build.DIST_INFO_STAGING_DIRNAME / "pkg-1.0.dist-info" / "METADATA"
+    assert written.read_text() == "Name: pkg\nVersion: 1.0\n"
+
+
 def test_build_target_image_command_has_no_network(tmp_path):
     cmd = build.build_target_image_command(tmp_path, "lynceus-target:abc123")
 
@@ -237,13 +393,18 @@ def test_build_target_image_command_has_no_network(tmp_path):
 
 # --- etiqueta y versiones -----------------------------------------------------
 
-def test_compute_target_tag_is_sha256_prefix_of_normalized_pin_lines(tmp_path):
+_DOCKERFILE_TEXT = "FROM lynceus-sandbox:0.1\n...\n"
+
+
+def test_compute_target_tag_is_sha256_prefix_of_normalized_pin_lines_and_dockerfile(tmp_path):
     resolved = tmp_path / "requirements.resolved.txt"
     resolved.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
 
-    tag = build.compute_target_tag(resolved)
+    tag = build.compute_target_tag(resolved, _DOCKERFILE_TEXT)
 
-    expected = hashlib.sha256(b"mcp==1.30.0 \\\n    --hash=sha256:aaaa").hexdigest()[:12]
+    expected = hashlib.sha256(
+        ("mcp==1.30.0 \\\n    --hash=sha256:aaaa" + "\0" + _DOCKERFILE_TEXT).encode()
+    ).hexdigest()[:12]
     assert tag == f"lynceus-target:{expected}"
 
 
@@ -258,7 +419,9 @@ def test_compute_target_tag_ignores_uv_header_comment(tmp_path):
         + pins
     )
 
-    assert build.compute_target_tag(without_header) == build.compute_target_tag(with_header)
+    assert build.compute_target_tag(without_header, _DOCKERFILE_TEXT) == build.compute_target_tag(
+        with_header, _DOCKERFILE_TEXT
+    )
 
 
 def test_compute_target_tag_ignores_via_annotations(tmp_path):
@@ -267,7 +430,9 @@ def test_compute_target_tag_ignores_via_annotations(tmp_path):
     with_via = tmp_path / "b.txt"
     with_via.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n    # via -r requirements.txt\n")
 
-    assert build.compute_target_tag(without_via) == build.compute_target_tag(with_via)
+    assert build.compute_target_tag(without_via, _DOCKERFILE_TEXT) == build.compute_target_tag(
+        with_via, _DOCKERFILE_TEXT
+    )
 
 
 def test_compute_target_tag_changes_when_a_version_changes(tmp_path):
@@ -276,7 +441,7 @@ def test_compute_target_tag_changes_when_a_version_changes(tmp_path):
     b = tmp_path / "b.txt"
     b.write_text("mcp==1.31.0 \\\n    --hash=sha256:aaaa\n")
 
-    assert build.compute_target_tag(a) != build.compute_target_tag(b)
+    assert build.compute_target_tag(a, _DOCKERFILE_TEXT) != build.compute_target_tag(b, _DOCKERFILE_TEXT)
 
 
 def test_compute_target_tag_changes_when_a_hash_changes(tmp_path):
@@ -285,7 +450,41 @@ def test_compute_target_tag_changes_when_a_hash_changes(tmp_path):
     b = tmp_path / "b.txt"
     b.write_text("mcp==1.30.0 \\\n    --hash=sha256:bbbb\n")
 
-    assert build.compute_target_tag(a) != build.compute_target_tag(b)
+    assert build.compute_target_tag(a, _DOCKERFILE_TEXT) != build.compute_target_tag(b, _DOCKERFILE_TEXT)
+
+
+def test_compute_target_tag_changes_when_dockerfile_text_changes(tmp_path):
+    resolved = tmp_path / "requirements.resolved.txt"
+    resolved.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+
+    a = build.compute_target_tag(resolved, "FROM lynceus-sandbox:0.1\n")
+    b = build.compute_target_tag(resolved, "FROM lynceus-sandbox:0.2\n")
+
+    assert a != b
+
+
+def test_compute_target_tag_changes_when_dist_info_contents_change(tmp_path):
+    resolved = tmp_path / "requirements.resolved.txt"
+    resolved.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+
+    a = build.compute_target_tag(resolved, _DOCKERFILE_TEXT, {"pkg-1.0.dist-info/METADATA": "Name: pkg\n"})
+    b = build.compute_target_tag(resolved, _DOCKERFILE_TEXT, {"pkg-2.0.dist-info/METADATA": "Name: pkg\n"})
+    without_dist_info = build.compute_target_tag(resolved, _DOCKERFILE_TEXT)
+
+    assert a != b
+    assert a != without_dist_info
+    assert without_dist_info == build.compute_target_tag(resolved, _DOCKERFILE_TEXT, {})
+
+
+def test_compute_target_tag_stable_for_same_dockerfile_and_dist_info(tmp_path):
+    resolved = tmp_path / "requirements.resolved.txt"
+    resolved.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+    dist_info = {"pkg-1.0.dist-info/METADATA": "Name: pkg\n", "pkg-1.0.dist-info/INSTALLER": "lynceus\n"}
+
+    first = build.compute_target_tag(resolved, _DOCKERFILE_TEXT, dist_info)
+    second = build.compute_target_tag(resolved, _DOCKERFILE_TEXT, dict(dist_info))
+
+    assert first == second
 
 
 def test_parse_pinned_versions_skips_hash_lines_and_comments():
@@ -529,3 +728,179 @@ def test_run_build_skips_image_rebuild_when_tag_already_exists(monkeypatch, targ
     assert result.skipped_image_build is True
     assert result.versions == [("mcp", "1.30.0")]
     assert not any("build" in cmd for cmd in calls)
+
+
+# --- orquestación: pyproject.toml genera metadatos sintéticos --------------
+
+@pytest.fixture
+def pyproject_target(tmp_path):
+    folder = tmp_path / "target"
+    folder.mkdir()
+    (folder / "pyproject.toml").write_text(
+        "[project]\nname = 'mcp-server-fetch'\nversion = '2026.10.10'\ndependencies = ['mcp']\n"
+    )
+    return folder
+
+
+def _fake_run_for_pyproject_build(resolved_text: str):
+    """Responde a `compile`/`download`/`build` como Docker, sin tocarlo: solo
+    escribe el fichero resuelto en el directorio de salida montado."""
+    def fake_run(cmd, **kwargs):
+        if "compile" in cmd:
+            mount_indices = [i for i, a in enumerate(cmd) if a == "-v"]
+            out_dir = Path(cmd[mount_indices[-1] + 1].split(":")[0])
+            (out_dir / build.RESOLVED_REQUIREMENTS_NAME).write_text(resolved_text)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if "download" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        if cmd[:2] == ["docker", "build"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise AssertionError(f"comando docker inesperado: {cmd}")
+    return fake_run
+
+
+def test_run_build_from_pyproject_generates_dist_info_and_copies_it_in_dockerfile(monkeypatch, pyproject_target):
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
+    monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
+
+    # La imagen objetivo (etiqueta calculada) no existe todavía; resolver/base sí.
+    monkeypatch.setattr(build, "_image_exists", lambda image: not image.startswith("lynceus-target:"))
+
+    monkeypatch.setattr(build.subprocess, "run", _fake_run_for_pyproject_build("mcp==1.30.0\n"))
+
+    result = build.run_build(pyproject_target, "pyproject.toml", cache_root=pyproject_target.parent / "cache-root")
+
+    assert result.warnings == []
+    dockerfile_text = (result.cache_dir / build.DOCKERFILE_NAME).read_text()
+    assert (
+        "COPY dist-info/mcp_server_fetch-2026.10.10.dist-info/ "
+        "/opt/target/lib/python3.12/site-packages/mcp_server_fetch-2026.10.10.dist-info/"
+    ) in dockerfile_text
+
+    metadata_file = (
+        result.cache_dir / build.DIST_INFO_STAGING_DIRNAME
+        / "mcp_server_fetch-2026.10.10.dist-info" / "METADATA"
+    )
+    assert "Name: mcp-server-fetch" in metadata_file.read_text()
+    assert "Version: 2026.10.10" in metadata_file.read_text()
+
+
+def test_run_build_warns_when_pyproject_version_is_dynamic(monkeypatch, tmp_path):
+    folder = tmp_path / "target"
+    folder.mkdir()
+    (folder / "pyproject.toml").write_text(
+        "[project]\nname = 'mcp-server-fetch'\ndynamic = ['version']\ndependencies = ['mcp']\n"
+    )
+
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
+    monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
+    monkeypatch.setattr(build, "_image_exists", lambda image: not image.startswith("lynceus-target:"))
+    monkeypatch.setattr(build.subprocess, "run", _fake_run_for_pyproject_build("mcp==1.30.0\n"))
+
+    result = build.run_build(folder, "pyproject.toml", cache_root=tmp_path / "cache-root")
+
+    assert len(result.warnings) == 1
+    assert "mcp-server-fetch" in result.warnings[0]
+    assert build._FALLBACK_VERSION in result.warnings[0]
+
+
+def test_run_build_raises_clear_error_before_docker_when_pyproject_has_no_name(monkeypatch, tmp_path):
+    folder = tmp_path / "target"
+    folder.mkdir()
+    (folder / "pyproject.toml").write_text("[project]\nversion = '1.0.0'\ndependencies = ['mcp']\n")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería llamar a Docker si falta [project].name")
+
+    monkeypatch.setattr(build, "_docker_available", fail_if_called)
+
+    with pytest.raises(build.BuildError, match=r"\[project\].name"):
+        build.run_build(folder, "pyproject.toml", cache_root=tmp_path / "cache-root")
+
+
+@pytest.mark.parametrize("malicious_name", ["../../etc/passwd", "a/b", "evil\nRUN whoami"])
+def test_run_build_raises_before_docker_when_pyproject_name_is_malicious(monkeypatch, tmp_path, malicious_name):
+    """El nombre del proyecto viene del servidor analizado (no confiable) y
+    acaba en una ruta de fichero y en una línea COPY del Dockerfile; debe
+    rechazarse antes de tocar Docker, no solo escaparse al construir la ruta."""
+    folder = tmp_path / "target"
+    folder.mkdir()
+    (folder / "pyproject.toml").write_text(
+        f"[project]\nname = {malicious_name!r}\nversion = '1.0.0'\ndependencies = ['mcp']\n"
+    )
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería llamar a Docker con un [project].name inválido")
+
+    monkeypatch.setattr(build, "_docker_available", fail_if_called)
+
+    with pytest.raises(build.BuildError, match="PEP 508"):
+        build.run_build(folder, "pyproject.toml", cache_root=tmp_path / "cache-root")
+
+
+def test_run_build_malicious_version_falls_back_and_never_reaches_dockerfile_or_dist_info(monkeypatch, tmp_path):
+    """Una versión con un salto de línea seguido de una instrucción de
+    Dockerfile (`RUN ...`) no debe llegar nunca a METADATA ni al Dockerfile
+    generado: debe caer en el mismo fallback que una versión ausente."""
+    folder = tmp_path / "target"
+    folder.mkdir()
+    payload = "1.0\nRUN rm -rf /"
+    (folder / "pyproject.toml").write_text(
+        f"[project]\nname = 'mcp-server-fetch'\nversion = {payload!r}\ndependencies = ['mcp']\n"
+    )
+
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
+    monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
+    monkeypatch.setattr(build, "_image_exists", lambda image: not image.startswith("lynceus-target:"))
+    monkeypatch.setattr(build.subprocess, "run", _fake_run_for_pyproject_build("mcp==1.30.0\n"))
+
+    result = build.run_build(folder, "pyproject.toml", cache_root=tmp_path / "cache-root")
+
+    assert len(result.warnings) == 1
+    dockerfile_text = (result.cache_dir / build.DOCKERFILE_NAME).read_text()
+    assert payload not in dockerfile_text
+    assert "RUN rm -rf /\n" not in dockerfile_text  # ninguna RUN inyectada, solo las dos propias de la receta
+
+    dist_info_dir = result.cache_dir / build.DIST_INFO_STAGING_DIRNAME
+    for metadata_path in dist_info_dir.rglob("METADATA"):
+        metadata_text = metadata_path.read_text()
+        assert payload not in metadata_text
+        assert f"Version: {build._FALLBACK_VERSION}" in metadata_text
+
+
+def test_run_build_tag_is_stable_across_repeated_runs_with_pyproject(monkeypatch, pyproject_target):
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
+    monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
+    monkeypatch.setattr(build, "_image_exists", lambda image: not image.startswith("lynceus-target:"))
+    monkeypatch.setattr(build.subprocess, "run", _fake_run_for_pyproject_build("mcp==1.30.0\n"))
+
+    first = build.run_build(pyproject_target, "pyproject.toml", cache_root=pyproject_target.parent / "cache-root-1")
+    second = build.run_build(pyproject_target, "pyproject.toml", cache_root=pyproject_target.parent / "cache-root-2")
+
+    assert first.tag == second.tag
+
+
+def test_run_build_tag_does_not_change_when_only_resolved_file_comments_change(monkeypatch, pyproject_target):
+    monkeypatch.setattr(build, "_docker_available", lambda: True)
+    monkeypatch.setattr(build, "_docker_responding", lambda: True)
+    monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
+    monkeypatch.setattr(build, "_image_exists", lambda image: not image.startswith("lynceus-target:"))
+
+    monkeypatch.setattr(
+        build.subprocess, "run",
+        _fake_run_for_pyproject_build("# This file was autogenerated by uv\nmcp==1.30.0\n"),
+    )
+    with_comment = build.run_build(
+        pyproject_target, "pyproject.toml", cache_root=pyproject_target.parent / "cache-root-a",
+    )
+
+    monkeypatch.setattr(build.subprocess, "run", _fake_run_for_pyproject_build("mcp==1.30.0\n"))
+    without_comment = build.run_build(
+        pyproject_target, "pyproject.toml", cache_root=pyproject_target.parent / "cache-root-b",
+    )
+
+    assert with_comment.tag == without_comment.tag

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
+import tomllib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from lynceus_sec.validator.runner import (
@@ -29,6 +31,18 @@ RESOLVER_IMAGE = "lynceus-resolver:0.1"
 RESOLVED_REQUIREMENTS_NAME = "requirements.resolved.txt"
 WHEELS_DIRNAME = "wheels"
 DOCKERFILE_NAME = "Dockerfile"
+DIST_INFO_STAGING_DIRNAME = "dist-info"
+
+# `python -m venv` dentro de la imagen base usa el mismo intérprete que el
+# resto del proyecto (ver CLAUDE.md): Python 3.12, igual que
+# `--python-version` en `build_resolve_command`.
+_TARGET_VENV_SITE_PACKAGES = "lib/python3.12/site-packages"
+
+# Usado cuando [project].version es dinámica o falta en el pyproject.toml
+# leído de forma estática: no se ejecuta el build backend, así que no hay
+# forma de conocer el valor real sin construir el proyecto (fuera de
+# alcance aquí).
+_FALLBACK_VERSION = "0.0.0+lynceus"
 
 # Con HOME=/tmp, pip y uv guardan su caché dentro del propio tmpfs: con
 # dependencias grandes (p. ej. mcp-server-fetch) agotan los 16 MB del sandbox
@@ -77,23 +91,18 @@ _PYTHON_PLATFORM_BY_ARCH = {
     "x86_64": "x86_64-unknown-linux-gnu",
 }
 
-_TARGET_DOCKERFILE_TEMPLATE = """\
-FROM {base_image}
-
-USER root
-COPY {requirements_name} /tmp/target-requirements.txt
-COPY {wheels_dirname}/ /tmp/target-wheels/
-RUN python -m venv /opt/target \\
-    && /opt/target/bin/pip install --no-cache-dir --no-index --find-links=/tmp/target-wheels \\
-         --require-hashes --only-binary=:all: -r /tmp/target-requirements.txt \\
-    && rm -rf /tmp/target-requirements.txt /tmp/target-wheels \\
-    && chown -R sandbox:sandbox /opt/target
-USER sandbox
-"""
-
 
 class BuildError(RuntimeError):
     pass
+
+
+@dataclass
+class ProjectMetadata:
+    """Nombre/versión de `[project]` en un pyproject.toml, leídos de forma
+    estática (sin instalar el proyecto ni ejecutar su build backend)."""
+    name: str
+    version: str
+    version_is_fallback: bool
 
 
 @dataclass
@@ -103,6 +112,7 @@ class BuildResult:
     cache_dir: Path
     versions: list[tuple[str, str]]
     skipped_image_build: bool
+    warnings: list[str] = field(default_factory=list)
 
 
 def detect_target_platform(image: str = DEFAULT_IMAGE) -> str:
@@ -237,12 +247,124 @@ def build_download_command(
     return name, cmd
 
 
-def render_target_dockerfile(base_image: str = DEFAULT_IMAGE) -> str:
-    return _TARGET_DOCKERFILE_TEMPLATE.format(
-        base_image=base_image,
-        requirements_name=RESOLVED_REQUIREMENTS_NAME,
-        wheels_dirname=WHEELS_DIRNAME,
-    )
+# PEP 508 (nombres de distribución): https://peps.python.org/pep-0508/#names
+# `fullmatch` (no `match`): con `match`, `$` da por válido un salto de línea
+# final ("abc\n" "casa" con el patrón) porque `$` no exige consumirlo; eso
+# dejaría pasar un nombre con un '\n' seguido de contenido arbitrario.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+# PEP 440 (versiones), forma pública sin el prefijo 'v' ni espacios en los
+# bordes que el propio PEP admite: aquí no hace falta aceptarlos, y admitirlos
+# abriría la puerta a bytes de relleno alrededor de una carga maliciosa.
+_PEP440_VERSION_RE = re.compile(
+    r"""
+    ^
+    (?:[0-9]+!)?                                               # epoch
+    [0-9]+(?:\.[0-9]+)*                                        # release
+    (?:[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?[0-9]*)?  # pre-release
+    (?:(?:-[0-9]+)|(?:[-_.]?(?:post|rev|r)[-_.]?[0-9]*))?       # post-release
+    (?:[-_.]?dev[-_.]?[0-9]*)?                                  # dev-release
+    (?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?                         # local version
+    $
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def read_pyproject_metadata(pyproject_path: Path) -> ProjectMetadata:
+    """Lee `[project].name`/`.version` de un pyproject.toml con `tomllib`, sin
+    instalar el proyecto: basta para que `importlib.metadata.version()`
+    encuentre algo coherente dentro de /opt/target, que nunca contiene el
+    propio proyecto instalado (solo sus dependencias; el código del servidor
+    se ejecuta desde /case vía PYTHONPATH).
+
+    `pyproject_path` es del servidor analizado, no confiable: nombre y
+    versión acaban en una ruta de fichero y en una línea `COPY` del
+    Dockerfile generado, así que se validan contra PEP 508/440 antes de
+    usarlos en ningún sitio. Un nombre inválido es un error (no hay nombre de
+    paquete razonable que inventar); una versión inválida usa el mismo
+    fallback que una versión dinámica o ausente."""
+    data = tomllib.loads(Path(pyproject_path).read_text())
+    project = data.get("project", {})
+    name = project.get("name")
+    if not name or not _PROJECT_NAME_RE.fullmatch(str(name)):
+        raise BuildError(
+            f"{pyproject_path} no declara un [project].name válido (PEP 508): "
+            f"no se pueden generar los metadatos del paquete objetivo."
+        )
+    name = str(name)
+
+    dynamic = project.get("dynamic") or []
+    version = project.get("version")
+    if version is None or "version" in dynamic:
+        return ProjectMetadata(name=name, version=_FALLBACK_VERSION, version_is_fallback=True)
+
+    version = str(version)
+    if not _PEP440_VERSION_RE.fullmatch(version):
+        return ProjectMetadata(name=name, version=_FALLBACK_VERSION, version_is_fallback=True)
+    return ProjectMetadata(name=name, version=version, version_is_fallback=False)
+
+
+_DISTINFO_ESCAPE_RE = re.compile(r"[^\w.]+", re.UNICODE)
+
+
+def _escape_distinfo_component(value: str) -> str:
+    """Mismo escapado que usan pip/wheel para construir el nombre de un
+    directorio `.dist-info` a partir del nombre/versión de un proyecto."""
+    return _DISTINFO_ESCAPE_RE.sub("_", value)
+
+
+def compute_dist_info_dirname(metadata: ProjectMetadata) -> str:
+    name = _escape_distinfo_component(metadata.name)
+    version = _escape_distinfo_component(metadata.version)
+    return f"{name}-{version}.dist-info"
+
+
+def render_dist_info_contents(metadata: ProjectMetadata) -> dict[str, str]:
+    """METADATA e INSTALLER mínimos para que `importlib.metadata.version()`
+    encuentre el paquete: sin entry points ni código, solo lo que pide la
+    tarea. INSTALLER vale "lynceus" para que quede claro que no vino de pip."""
+    dirname = compute_dist_info_dirname(metadata)
+    metadata_text = f"Metadata-Version: 2.1\nName: {metadata.name}\nVersion: {metadata.version}\n"
+    return {
+        f"{dirname}/METADATA": metadata_text,
+        f"{dirname}/INSTALLER": "lynceus\n",
+    }
+
+
+def write_dist_info_contents(cache_dir: Path, contents: dict[str, str]) -> None:
+    staging = Path(cache_dir) / DIST_INFO_STAGING_DIRNAME
+    for relpath, text in contents.items():
+        path = staging / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def render_target_dockerfile(base_image: str = DEFAULT_IMAGE, *, dist_info_dirname: str | None = None) -> str:
+    """Dockerfile de la imagen objetivo. Si `dist_info_dirname` no es None,
+    copia también el `.dist-info` mínimo generado por `render_dist_info_contents`
+    al site-packages del venv, antes de fijar los permisos finales."""
+    lines = [
+        f"FROM {base_image}",
+        "",
+        "USER root",
+        f"COPY {RESOLVED_REQUIREMENTS_NAME} /tmp/target-requirements.txt",
+        f"COPY {WHEELS_DIRNAME}/ /tmp/target-wheels/",
+        "RUN python -m venv /opt/target \\",
+        "    && /opt/target/bin/pip install --no-cache-dir --no-index --find-links=/tmp/target-wheels \\",
+        "         --require-hashes --only-binary=:all: -r /tmp/target-requirements.txt \\",
+        "    && rm -rf /tmp/target-requirements.txt /tmp/target-wheels",
+    ]
+    if dist_info_dirname is not None:
+        lines.append(
+            f"COPY {DIST_INFO_STAGING_DIRNAME}/{dist_info_dirname}/ "
+            f"/opt/target/{_TARGET_VENV_SITE_PACKAGES}/{dist_info_dirname}/"
+        )
+    lines += [
+        "RUN chown -R sandbox:sandbox /opt/target",
+        "USER sandbox",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def build_target_image_command(context_dir: Path, tag: str) -> list[str]:
@@ -270,9 +392,19 @@ def _normalized_pin_lines(resolved_text: str) -> str:
     return "\n".join(lines)
 
 
-def compute_target_tag(resolved_path: Path) -> str:
+def compute_target_tag(
+    resolved_path: Path, dockerfile_text: str, dist_info_contents: dict[str, str] | None = None,
+) -> str:
+    """Etiqueta determinista sobre todo lo que entra en la imagen: las
+    dependencias normalizadas, el Dockerfile generado (receta de construcción)
+    y los metadatos añadidos (si los hay). Así una imagen vieja construida
+    con otra receta (p. ej. sin el `.dist-info` sintético) nunca se reutiliza
+    por error bajo la misma etiqueta."""
     normalized = _normalized_pin_lines(Path(resolved_path).read_text())
-    digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
+    parts = [normalized, dockerfile_text]
+    for relpath in sorted(dist_info_contents or {}):
+        parts.append(f"{relpath}\0{dist_info_contents[relpath]}")
+    digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:12]
     return f"lynceus-target:{digest}"
 
 
@@ -347,7 +479,21 @@ def run_build(
     build_timeout: float = 60.0,
 ) -> BuildResult:
     requirements_path = Path(target) / requirements
-    resolver_mount_name(requirements_path)  # falla pronto, sin tocar Docker, si uv no reconocería el nombre
+    # Falla pronto, sin tocar Docker, si uv no reconocería el nombre o si
+    # falta [project].name en un pyproject.toml.
+    mount_name = resolver_mount_name(requirements_path)
+    warnings: list[str] = []
+    dist_info_dirname: str | None = None
+    dist_info_contents: dict[str, str] | None = None
+    if mount_name == "pyproject.toml":
+        metadata = read_pyproject_metadata(requirements_path)
+        if metadata.version_is_fallback:
+            warnings.append(
+                f"{requirements!r} no fija una versión estática de {metadata.name!r} "
+                f"(dinámica o ausente); se usa {metadata.version!r} en los metadatos generados."
+            )
+        dist_info_dirname = compute_dist_info_dirname(metadata)
+        dist_info_contents = render_dist_info_contents(metadata)
 
     _check_images(resolver_image, base_image)
     python_platform = detect_target_platform(base_image)
@@ -367,16 +513,20 @@ def run_build(
     name, cmd = build_download_command(cache_dir, image=resolver_image)
     _run_or_raise(cmd, name, "La descarga de las ruedas resueltas", timeout=download_timeout)
 
-    tag = compute_target_tag(resolved_path)
+    dockerfile_text = render_target_dockerfile(base_image, dist_info_dirname=dist_info_dirname)
+    tag = compute_target_tag(resolved_path, dockerfile_text, dist_info_contents)
     versions = parse_pinned_versions(resolved_path.read_text())
 
     if _image_exists(tag):
         return BuildResult(
             tag=tag, resolved_path=resolved_path, cache_dir=cache_dir,
-            versions=versions, skipped_image_build=True,
+            versions=versions, skipped_image_build=True, warnings=warnings,
         )
 
-    (cache_dir / DOCKERFILE_NAME).write_text(render_target_dockerfile(base_image))
+    (cache_dir / DOCKERFILE_NAME).write_text(dockerfile_text)
+    if dist_info_contents:
+        write_dist_info_contents(cache_dir, dist_info_contents)
+
     cmd = build_target_image_command(cache_dir, tag)
     try:
         proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=build_timeout)
@@ -388,5 +538,5 @@ def run_build(
 
     return BuildResult(
         tag=tag, resolved_path=resolved_path, cache_dir=cache_dir,
-        versions=versions, skipped_image_build=False,
+        versions=versions, skipped_image_build=False, warnings=warnings,
     )

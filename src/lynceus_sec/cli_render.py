@@ -532,6 +532,8 @@ def render_build_result(console: Console, result, *, plain: bool) -> None:
         console.print(f"[resuelto] {result.resolved_path}")
         if result.skipped_image_build:
             console.print("[build] la imagen ya existía, no se reconstruye")
+        for warning in result.warnings:
+            console.print(f"[aviso] {sanitize_untrusted(warning)}")
         for name, ver in result.versions:
             console.print(f"  {sanitize_untrusted(name)}=={sanitize_untrusted(ver)}")
         return
@@ -553,6 +555,12 @@ def render_build_result(console: Console, result, *, plain: bool) -> None:
 
     if result.skipped_image_build:
         console.print(Text("La imagen ya existía; no se reconstruye.", style=GOLD))
+
+    for warning in result.warnings:
+        warning_text = Text()
+        warning_text.append("⚠️  ", style=f"bold {AMBER_BRIGHT}")
+        warning_text.append(sanitize_untrusted(warning), style=GOLD)
+        console.print(warning_text)
 
 
 def render_report_paths(console: Console, *, json_path: str | None, report_path: str | None, plain: bool) -> None:
