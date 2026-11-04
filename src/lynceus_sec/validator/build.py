@@ -10,6 +10,7 @@ duplicarlas.
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -24,11 +25,47 @@ from lynceus_sec.validator.runner import (
 )
 
 RESOLVER_IMAGE = "lynceus-resolver:0.1"
-CACHE_ROOT = Path.home() / ".cache" / "lynceus" / "build"
 
 RESOLVED_REQUIREMENTS_NAME = "requirements.resolved.txt"
 WHEELS_DIRNAME = "wheels"
 DOCKERFILE_NAME = "Dockerfile"
+
+# Con HOME=/tmp, pip y uv guardan su caché dentro del propio tmpfs: con
+# dependencias grandes (p. ej. mcp-server-fetch) agotan los 16 MB del sandbox
+# de `scan` aunque las ruedas se descarguen a /resolve/out (montado, no a
+# /tmp). Se desactiva la caché de ambas herramientas y, por si acaso alguna
+# escribe ahí temporales que no son caché, se da más margen solo aquí: el
+# tmpfs del sandbox de `scan` (`_security_flags`) no cambia.
+_RESOLVER_TMP_SIZE = "512m"
+
+
+def _resolver_security_flags(memory: str, cpus: str, pids_limit: int) -> list[str]:
+    """Mismo endurecimiento que el sandbox de `scan` (`_security_flags`), sin
+    tocarlo ni a sus demás llamadores: solo se amplía aquí el tamaño del
+    tmpfs de /tmp, conservando noexec/nosuid/nodev."""
+    flags = _security_flags(memory, cpus, pids_limit, home="/tmp")
+    idx = flags.index("--tmpfs") + 1
+    flags[idx] = f"/tmp:rw,noexec,nosuid,nodev,size={_RESOLVER_TMP_SIZE}"
+    return flags
+
+# `uv pip compile` identifica el formato de entrada por el nombre del fichero
+# (extensión `.txt`/`.in`, o el nombre exacto `pyproject.toml`); montarlo
+# renombrado como `requirements.in` rompe cualquier otro formato.
+_RESOLVER_ACCEPTED_SUFFIXES = {".txt", ".in"}
+_RESOLVER_ACCEPTED_EXACT_NAMES = {"pyproject.toml"}
+
+
+def resolver_mount_name(requirements_path: Path) -> str:
+    """Nombre con el que montar `requirements_path` en el contenedor de
+    resolución, conservando el original para que `uv pip compile` reconozca
+    su formato. Falla con un error claro si uv no sabe interpretar ese nombre."""
+    name = Path(requirements_path).name
+    if name in _RESOLVER_ACCEPTED_EXACT_NAMES or Path(name).suffix in _RESOLVER_ACCEPTED_SUFFIXES:
+        return name
+    raise BuildError(
+        f"Fichero de requisitos {name!r} no reconocido por 'uv pip compile'; "
+        f"usa un .txt, un .in o 'pyproject.toml'."
+    )
 
 # `docker image inspect --format '{{.Architecture}}'` usa los nombres de Go
 # ("arm64", "amd64"); `uv pip compile --python-platform` usa los triples de
@@ -101,10 +138,22 @@ def cache_id(target: Path, requirements: str, resolve_date: str | None) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+def default_cache_root() -> Path:
+    """Base de la caché de `lynceus build`: `$LYNCEUS_CACHE_DIR/build` si la
+    variable está definida, si no `~/.cache/lynceus/build`. Se resuelve en
+    cada llamada (no en un `Path` fijado al importar el módulo) para que los
+    tests puedan apuntarla a un directorio temporal vía variable de entorno,
+    sin tocar nunca la caché real del usuario."""
+    base = os.environ.get("LYNCEUS_CACHE_DIR")
+    root = Path(base) if base else Path.home() / ".cache" / "lynceus"
+    return root / "build"
+
+
 def cache_dir_for(
-    target: Path, requirements: str, resolve_date: str | None, *, cache_root: Path = CACHE_ROOT
+    target: Path, requirements: str, resolve_date: str | None, *, cache_root: Path | None = None
 ) -> Path:
-    return Path(cache_root) / cache_id(target, requirements, resolve_date)
+    root = cache_root if cache_root is not None else default_cache_root()
+    return Path(root) / cache_id(target, requirements, resolve_date)
 
 
 def ensure_cache_dir_outside_target(cache_dir: Path, target: Path) -> None:
@@ -134,15 +183,17 @@ def build_resolve_command(
     """Comando de resolución: mismo endurecimiento que el sandbox de `scan`
     (vía `_security_flags`), pero sin `--network none` — este es el único
     paso de `lynceus build` con red permitida."""
+    mount_name = resolver_mount_name(requirements_path)
     name = container_name or f"lynceus-resolve-{uuid.uuid4().hex[:12]}"
     cmd = [
         "docker", "run", "--rm",
         "--name", name,
-        *_security_flags(memory, cpus, pids_limit, home="/tmp"),
-        "-v", f"{Path(requirements_path).resolve()}:/resolve/requirements.in:ro",
+        *_resolver_security_flags(memory, cpus, pids_limit),
+        "-v", f"{Path(requirements_path).resolve()}:/resolve/{mount_name}:ro",
         "-v", f"{Path(output_dir).resolve()}:/resolve/out:rw",
         image,
-        "uv", "pip", "compile", "/resolve/requirements.in",
+        "uv", "pip", "compile", f"/resolve/{mount_name}",
+        "--no-cache",
         "--python-version", "3.12",
         "--python-platform", python_platform,
         "--generate-hashes",
@@ -172,10 +223,11 @@ def build_download_command(
     cmd = [
         "docker", "run", "--rm",
         "--name", name,
-        *_security_flags(memory, cpus, pids_limit, home="/tmp"),
+        *_resolver_security_flags(memory, cpus, pids_limit),
         "-v", f"{Path(output_dir).resolve()}:/resolve/out:rw",
         image,
         "python", "-m", "pip", "download",
+        "--no-cache-dir",
         "--no-deps",
         "--require-hashes",
         "--only-binary=:all:",
@@ -205,8 +257,22 @@ def build_target_image_command(context_dir: Path, tag: str) -> list[str]:
     ]
 
 
+def _normalized_pin_lines(resolved_text: str) -> str:
+    """Líneas de paquete fijado y sus continuaciones `--hash=...`, sin
+    comentarios: ni la cabecera que genera uv (comando y ruta de entrada,
+    que cambia con el nombre del fichero montado) ni las anotaciones
+    `# via`. La etiqueta depende de las dependencias fijadas, no de cómo se
+    invocó uv ni de qué las pidió."""
+    lines = [
+        line for line in resolved_text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return "\n".join(lines)
+
+
 def compute_target_tag(resolved_path: Path) -> str:
-    digest = hashlib.sha256(Path(resolved_path).read_bytes()).hexdigest()[:12]
+    normalized = _normalized_pin_lines(Path(resolved_path).read_text())
+    digest = hashlib.sha256(normalized.encode()).hexdigest()[:12]
     return f"lynceus-target:{digest}"
 
 
@@ -241,12 +307,27 @@ def _check_images(resolver_image: str, base_image: str) -> None:
         )
 
 
+def _decode_partial_output(output: bytes | str | None) -> str:
+    """`subprocess.run` adjunta a `TimeoutExpired` lo ya leído de stdout/stderr
+    en el momento del timeout, pero siempre en bytes (incluso con
+    `text=True`: ver `Popen.communicate`, que no decodifica en la ruta de
+    excepción). Se trunca a las últimas líneas: lo útil es dónde se quedó
+    colgado, no el historial completo."""
+    if output is None:
+        return ""
+    text = output.decode(errors="replace") if isinstance(output, bytes) else output
+    lines = text.strip().splitlines()
+    return "\n".join(lines[-20:])
+
+
 def _run_or_raise(cmd: list[str], container_name: str, step: str, *, timeout: float) -> None:
     try:
         proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         subprocess.run(["docker", "kill", container_name], check=False, capture_output=True)
-        raise BuildError(f"{step} no terminó en {timeout}s") from exc
+        partial = _decode_partial_output(exc.stderr) or _decode_partial_output(exc.stdout)
+        detail = f" Última salida antes del timeout:\n{partial}" if partial else " (sin salida capturada antes del timeout)"
+        raise BuildError(f"{step} no terminó en {timeout}s.{detail}") from exc
 
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or f"código de salida {proc.returncode}"
@@ -258,13 +339,16 @@ def run_build(
     requirements: str,
     *,
     resolve_date: str | None = None,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Path | None = None,
     resolver_image: str = RESOLVER_IMAGE,
     base_image: str = DEFAULT_IMAGE,
     resolve_timeout: float = 120.0,
     download_timeout: float = 180.0,
     build_timeout: float = 60.0,
 ) -> BuildResult:
+    requirements_path = Path(target) / requirements
+    resolver_mount_name(requirements_path)  # falla pronto, sin tocar Docker, si uv no reconocería el nombre
+
     _check_images(resolver_image, base_image)
     python_platform = detect_target_platform(base_image)
 
@@ -272,7 +356,6 @@ def run_build(
     ensure_cache_dir_outside_target(cache_dir, target)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    requirements_path = Path(target) / requirements
     name, cmd = build_resolve_command(
         requirements_path, cache_dir, python_platform=python_platform,
         resolve_date=resolve_date, image=resolver_image,

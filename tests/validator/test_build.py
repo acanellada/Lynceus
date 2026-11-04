@@ -38,6 +38,19 @@ def test_resolve_command_includes_all_isolation_protections(target, output_dir):
     assert "--user" in cmd
 
 
+def test_resolve_command_disables_cache_and_widens_tmp_without_relaxing_other_protections(target, output_dir):
+    """Con HOME=/tmp, uv guardaría su caché dentro del tmpfs: sin --no-cache,
+    dependencias grandes (p. ej. mcp-server-fetch) agotan un tmpfs de 16 MB.
+    El tmpfs crece solo para este contenedor, sin perder noexec/nosuid/nodev."""
+    _, cmd = build.build_resolve_command(
+        target / "requirements.txt", output_dir, python_platform="x86_64-unknown-linux-gnu",
+    )
+
+    assert "--no-cache" in cmd
+    idx = cmd.index("--tmpfs")
+    assert cmd[idx + 1] == "/tmp:rw,noexec,nosuid,nodev,size=512m"
+
+
 def test_resolve_command_never_restricts_network():
     """Este es el único paso de `lynceus build` con red permitida: no debe
     llevar `--network`."""
@@ -87,8 +100,76 @@ def test_resolve_command_mounts_only_requirements_ro_and_output_dir_rw(target, o
 
     mounts = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-v"]
     assert len(mounts) == 2
-    assert f"{(target / 'requirements.txt').resolve()}:/resolve/requirements.in:ro" in mounts
+    assert f"{(target / 'requirements.txt').resolve()}:/resolve/requirements.txt:ro" in mounts
     assert f"{output_dir.resolve()}:/resolve/out:rw" in mounts
+
+
+# --- nombre de montaje: uv identifica el formato por el nombre del fichero --
+
+def test_resolver_mount_name_keeps_original_name_for_txt():
+    assert build.resolver_mount_name(Path("/some/requirements.txt")) == "requirements.txt"
+
+
+def test_resolver_mount_name_keeps_original_name_for_in():
+    assert build.resolver_mount_name(Path("/some/requirements.in")) == "requirements.in"
+
+
+def test_resolver_mount_name_keeps_original_name_for_pyproject_toml():
+    assert build.resolver_mount_name(Path("/some/pyproject.toml")) == "pyproject.toml"
+
+
+def test_resolver_mount_name_rejects_unknown_extension():
+    with pytest.raises(build.BuildError, match="setup.cfg"):
+        build.resolver_mount_name(Path("/some/setup.cfg"))
+
+
+def test_resolver_mount_name_rejects_toml_file_that_is_not_pyproject():
+    with pytest.raises(build.BuildError, match="other.toml"):
+        build.resolver_mount_name(Path("/some/other.toml"))
+
+
+def test_resolve_command_mounts_pyproject_toml_with_its_own_name(tmp_path, output_dir):
+    target = tmp_path / "target"
+    target.mkdir()
+    pyproject = target / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'x'\ndependencies = ['mcp']\n")
+
+    _, cmd = build.build_resolve_command(
+        pyproject, output_dir, python_platform="x86_64-unknown-linux-gnu",
+    )
+
+    mounts = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-v"]
+    assert f"{pyproject.resolve()}:/resolve/pyproject.toml:ro" in mounts
+    assert "/resolve/pyproject.toml" in cmd
+    assert "/resolve/requirements.in" not in cmd
+
+
+def test_resolve_command_raises_clear_error_for_unsupported_requirements_name(tmp_path, output_dir):
+    target = tmp_path / "target"
+    target.mkdir()
+    unsupported = target / "setup.cfg"
+    unsupported.write_text("[metadata]\n")
+
+    with pytest.raises(build.BuildError, match="setup.cfg"):
+        build.build_resolve_command(
+            unsupported, output_dir, python_platform="x86_64-unknown-linux-gnu",
+        )
+
+
+# --- orquestación: formato no soportado se detecta sin tocar Docker --------
+
+def test_run_build_rejects_unsupported_requirements_name_before_touching_docker(monkeypatch, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "setup.cfg").write_text("[metadata]\n")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("no debería llamar a Docker con un fichero de requisitos no soportado")
+
+    monkeypatch.setattr(build, "_docker_available", fail_if_called)
+
+    with pytest.raises(build.BuildError, match="setup.cfg"):
+        build.run_build(target, "setup.cfg")
 
 
 # --- comando de descarga (pip download) --------------------------------------
@@ -102,6 +183,14 @@ def test_download_command_includes_all_isolation_protections(output_dir):
     assert "--pids-limit" in cmd
     assert "--memory" in cmd
     assert "--user" in cmd
+
+
+def test_download_command_disables_cache_and_widens_tmp_without_relaxing_other_protections(output_dir):
+    _, cmd = build.build_download_command(output_dir)
+
+    assert "--no-cache-dir" in cmd
+    idx = cmd.index("--tmpfs")
+    assert cmd[idx + 1] == "/tmp:rw,noexec,nosuid,nodev,size=512m"
 
 
 def test_download_command_requires_hashes_and_only_binary_without_deps(output_dir):
@@ -148,14 +237,55 @@ def test_build_target_image_command_has_no_network(tmp_path):
 
 # --- etiqueta y versiones -----------------------------------------------------
 
-def test_compute_target_tag_is_sha256_prefix_of_resolved_file(tmp_path):
+def test_compute_target_tag_is_sha256_prefix_of_normalized_pin_lines(tmp_path):
     resolved = tmp_path / "requirements.resolved.txt"
-    resolved.write_text("mcp==1.30.0\n    --hash=sha256:aaaa\n")
+    resolved.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
 
     tag = build.compute_target_tag(resolved)
 
-    expected = hashlib.sha256(resolved.read_bytes()).hexdigest()[:12]
+    expected = hashlib.sha256(b"mcp==1.30.0 \\\n    --hash=sha256:aaaa").hexdigest()[:12]
     assert tag == f"lynceus-target:{expected}"
+
+
+def test_compute_target_tag_ignores_uv_header_comment(tmp_path):
+    pins = "mcp==1.30.0 \\\n    --hash=sha256:aaaa\n"
+    without_header = tmp_path / "a.txt"
+    without_header.write_text(pins)
+    with_header = tmp_path / "b.txt"
+    with_header.write_text(
+        "# This file was autogenerated by uv via the following command:\n"
+        "#    uv pip compile /resolve/requirements.txt --python-version 3.12\n"
+        + pins
+    )
+
+    assert build.compute_target_tag(without_header) == build.compute_target_tag(with_header)
+
+
+def test_compute_target_tag_ignores_via_annotations(tmp_path):
+    without_via = tmp_path / "a.txt"
+    without_via.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+    with_via = tmp_path / "b.txt"
+    with_via.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n    # via -r requirements.txt\n")
+
+    assert build.compute_target_tag(without_via) == build.compute_target_tag(with_via)
+
+
+def test_compute_target_tag_changes_when_a_version_changes(tmp_path):
+    a = tmp_path / "a.txt"
+    a.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+    b = tmp_path / "b.txt"
+    b.write_text("mcp==1.31.0 \\\n    --hash=sha256:aaaa\n")
+
+    assert build.compute_target_tag(a) != build.compute_target_tag(b)
+
+
+def test_compute_target_tag_changes_when_a_hash_changes(tmp_path):
+    a = tmp_path / "a.txt"
+    a.write_text("mcp==1.30.0 \\\n    --hash=sha256:aaaa\n")
+    b = tmp_path / "b.txt"
+    b.write_text("mcp==1.30.0 \\\n    --hash=sha256:bbbb\n")
+
+    assert build.compute_target_tag(a) != build.compute_target_tag(b)
 
 
 def test_parse_pinned_versions_skips_hash_lines_and_comments():
@@ -255,6 +385,52 @@ def test_detect_target_platform_raises_on_timeout(monkeypatch):
         build.detect_target_platform("lynceus-sandbox:0.1")
 
 
+# --- _run_or_raise: un timeout no debe perder la salida ya capturada --------
+
+def test_run_or_raise_includes_partial_output_captured_before_timeout(monkeypatch):
+    """`subprocess.run` adjunta a `TimeoutExpired` lo ya leído de stdout/stderr
+    (siempre en bytes, incluso con `text=True`); antes se descartaba, dejando
+    'no terminó en Ns' sin ninguna pista de dónde se quedó colgado."""
+    exc = subprocess.TimeoutExpired(cmd=["docker"], timeout=120.0)
+    exc.stdout = b"Resolved 10 packages\nDownloading foo-1.0.0.whl\n"
+    exc.stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["docker", "kill"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise exc
+
+    monkeypatch.setattr(build.subprocess, "run", fake_run)
+
+    with pytest.raises(build.BuildError, match="Downloading foo-1.0.0.whl"):
+        build._run_or_raise(["docker", "run"], "some-container", "La resolución de dependencias", timeout=120.0)
+
+
+def test_run_or_raise_timeout_without_any_output_says_so_explicitly(monkeypatch):
+    exc = subprocess.TimeoutExpired(cmd=["docker"], timeout=120.0)
+    exc.stdout = b""
+    exc.stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["docker", "kill"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        raise exc
+
+    monkeypatch.setattr(build.subprocess, "run", fake_run)
+
+    with pytest.raises(build.BuildError, match="sin salida capturada"):
+        build._run_or_raise(["docker", "run"], "some-container", "La resolución de dependencias", timeout=120.0)
+
+
+def test_decode_partial_output_keeps_only_the_tail():
+    text = "\n".join(f"line {i}" for i in range(30)).encode()
+
+    decoded = build._decode_partial_output(text)
+
+    assert "line 29" in decoded
+    assert "line 0" not in decoded
+
+
 # --- _check_images: Docker en pausa no debe confundirse con "no existe" -----
 
 
@@ -298,7 +474,6 @@ def test_run_build_stops_before_docker_build_when_a_dependency_has_no_wheel(monk
     monkeypatch.setattr(build, "_docker_responding", lambda: True)
     monkeypatch.setattr(build, "_image_exists", lambda image: True)  # resolver/base ya existen
     monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
-    monkeypatch.setattr(build, "CACHE_ROOT", target.parent / "cache-root")
 
     calls: list[list[str]] = []
 
@@ -319,7 +494,7 @@ def test_run_build_stops_before_docker_build_when_a_dependency_has_no_wheel(monk
     monkeypatch.setattr(build.subprocess, "run", fake_run)
 
     with pytest.raises(build.BuildError, match="sinbinario"):
-        build.run_build(target, "requirements.txt")
+        build.run_build(target, "requirements.txt", cache_root=target.parent / "cache-root")
 
     assert not any("build" in cmd for cmd in calls)
 
@@ -328,7 +503,6 @@ def test_run_build_skips_image_rebuild_when_tag_already_exists(monkeypatch, targ
     monkeypatch.setattr(build, "_docker_available", lambda: True)
     monkeypatch.setattr(build, "_docker_responding", lambda: True)
     monkeypatch.setattr(build, "detect_target_platform", lambda image: "x86_64-unknown-linux-gnu")
-    monkeypatch.setattr(build, "CACHE_ROOT", target.parent / "cache-root")
 
     def fake_image_exists(image):
         return True  # tanto la imagen base/resolver como la etiqueta objetivo "existen"
@@ -350,7 +524,7 @@ def test_run_build_skips_image_rebuild_when_tag_already_exists(monkeypatch, targ
 
     monkeypatch.setattr(build.subprocess, "run", fake_run)
 
-    result = build.run_build(target, "requirements.txt")
+    result = build.run_build(target, "requirements.txt", cache_root=target.parent / "cache-root")
 
     assert result.skipped_image_build is True
     assert result.versions == [("mcp", "1.30.0")]
