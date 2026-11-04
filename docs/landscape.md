@@ -163,6 +163,18 @@ Observación: run_command intenta limitarse a un comando simple con una lista ne
 
 Limitaciones: sin versión corregida, este caso mide la detección pero no la capacidad de distinguir una corrección.
 
+## Tercer servidor real: CVE-2025-65513 (04/11/2026)
+
+Objetivo: modelcontextprotocol/servers, src/fetch. Vulnerable: commit 9a4d513 (30/03/2025), sin ninguna comprobación de la dirección de destino. Corregida: 2026.10.10 (commit 3423e57), que rechaza por defecto direcciones privadas, de loopback y de metadatos (commit 315ad50). Las dependencias se declaran en pyproject.toml.
+
+Entornos: dependencias resueltas a la fecha de cada commit (SDK de MCP 1.6.0 y 2.3.0). La corregida consulta su propia versión instalada al importarse; como el proyecto no se instala (construirlo ejecutaría su backend de construcción), lynceus build genera solo sus metadatos mínimos a partir del pyproject.toml, con nombre y versión validados.
+
+Resultado: la vulnerable, confirmada con host_url e ip_url (17 segundos); la corregida, sin hallazgos ni inconclusos (8,5 segundos). El harness, con el SDK 1.30, se comunica con un servidor del SDK 2.3.0 sin problemas.
+
+Problemas de Lynceus que destapó este caso, ya corregidos: un pyproject.toml como entrada se leía como lista de requisitos; la etiqueta de la imagen dependía de comentarios del fichero resuelto y no cubría todo el contenido de la imagen; los tests escribían en la caché real del usuario; y el contenedor de resolución guardaba su caché en un /tmp de 16 MB.
+
+Limitaciones: en SSRF no hay control positivo. Sin salida a Internet, no se puede comprobar que la versión corregida siga descargando URL públicas: el resultado negativo es el esperado, pero no se verifica que la herramienta funcione.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner

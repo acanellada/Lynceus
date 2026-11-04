@@ -79,6 +79,17 @@ Este caso destapó un falso positivo en la versión anterior de Lynceus (el cana
 | `run_command` | Capacidad por diseño: ejecuta comandos a propósito, así que no se reporta como inyección |
 | Las otras siete | Sin hallazgos |
 
+### Tercer servidor real: CVE-2025-65513
+
+`mcp-server-fetch`, el servidor de referencia oficial para descargar páginas web, no comprobaba a qué dirección se conectaba. La versión de octubre de 2026 rechaza por defecto las IP privadas, de loopback y de metadatos. Cada versión se analiza con su propio entorno: la vulnerable con el SDK de MCP 1.6.0 y la corregida con el 2.3.0.
+
+| Versión | Resultado |
+|---|---|
+| Marzo de 2025 (vulnerable) | SSRF confirmada: el receptor recibió la petición por nombre y por IP |
+| 2026.10.10 (corregida) | Sin hallazgos |
+
+Con este caso, Lynceus ha reproducido un CVE real de cada una de sus tres clases, y en dos de ellos ha distinguido la versión vulnerable de su corrección.
+
 ## Inicio rápido
 
 Requisitos: Python 3.12, [uv](https://docs.astral.sh/uv/) y Docker.
@@ -168,7 +179,7 @@ El modelo de amenazas completo está en [`docs/threat-model.md`](docs/threat-mod
 
 ## Hoja de ruta
 
-- Más servidores reales con CVE publicado (por ejemplo, `mcp-server-fetch` para SSRF).
+- Un lote de servidores reales con versión vulnerable y corregida, para medir la precisión con casos reales y no solo la detección.
 - Un lote de casos nuevo, no usado durante el desarrollo, para una medida independiente.
 - Salida SARIF y GitHub Action.
 - Distribución como skill para agentes de código, cuando haya una versión estable.
