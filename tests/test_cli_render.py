@@ -5,6 +5,10 @@ from rich.console import Console
 from lynceus_sec.cli_render import (
     ScanSummary,
     is_plain_mode,
+    render_capabilities,
+    render_clean_images,
+    render_clean_plan,
+    render_clean_result,
     render_findings_table,
     render_fs_root,
     render_inconclusive,
@@ -14,6 +18,7 @@ from lynceus_sec.cli_render import (
 )
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.report import SSRF_RECEIVER_NOTE
+from lynceus_sec.validator.clean import TargetImage
 
 
 def test_sanitize_strips_ansi_escape_sequences():
@@ -226,13 +231,142 @@ def test_render_positive_controls_is_silent_when_empty(capsys):
     assert out == ""
 
 
-def test_render_positive_controls_plain_shows_status_per_item(capsys):
+def test_render_positive_controls_plain_shows_summary_and_only_confirmed_items(capsys):
     console = Console(no_color=True, force_terminal=False, soft_wrap=True)
-    positive_controls = {"path_traversal": [{"tool": "read_doc", "parameter": "name", "status": "confirmed"}]}
+    positive_controls = {
+        "path_traversal": [
+            {"tool": "read_doc", "parameter": "name", "status": "confirmed"},
+            {"tool": "read_doc", "parameter": "other", "status": "not_confirmed"},
+        ]
+    }
 
     render_positive_controls(console, positive_controls, plain=True)
     out = capsys.readouterr().out
 
-    assert "1 control positivo" in out
+    assert "1 de 2 parámetros devuelve contenido dentro del límite" in out
     assert "read_doc" in out
-    assert "confirmed" in out
+    assert "parametro=name" in out
+    assert "parametro=other" not in out
+
+
+def test_render_positive_controls_rich_shows_only_confirmed_items():
+    console = Console(record=True, width=100)
+    positive_controls = {
+        "path_traversal": [
+            {"tool": "read_doc", "parameter": "name", "status": "confirmed"},
+            {"tool": "read_doc", "parameter": "other", "status": "not_confirmed"},
+        ]
+    }
+
+    render_positive_controls(console, positive_controls, plain=False)
+    out = console.export_text()
+
+    assert "1 de 2 parámetros" in out
+    assert "devuelve contenido" in out
+    assert "name" in out
+    assert "other" not in out
+
+
+def test_render_capabilities_notes_bypassable_filter_with_eluding_and_blocked_techniques(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    capabilities = {
+        "command_injection": [
+            {
+                "tool": "run_shell",
+                "parameter": "command",
+                "probe": None,
+                "confirmations": [{"technique": "shell_semicolon_bare", "reproduction": [], "evidence": "x"}],
+                "blocked_techniques": ["shell_pipe_bare"],
+                "bypassable_filter": True,
+            }
+        ]
+    }
+
+    render_capabilities(console, capabilities, plain=True)
+    out = capsys.readouterr().out
+
+    assert "filtro_eludible" in out
+    assert "shell_semicolon_bare" in out
+    assert "shell_pipe_bare" in out
+
+
+def test_render_capabilities_omits_bypassable_note_when_not_set(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    capabilities = {
+        "command_injection": [
+            {
+                "tool": "run_shell",
+                "parameter": "command",
+                "probe": None,
+                "confirmations": [{"technique": "shell_semicolon_bare", "reproduction": [], "evidence": "x"}],
+                "blocked_techniques": [],
+                "bypassable_filter": False,
+            }
+        ]
+    }
+
+    render_capabilities(console, capabilities, plain=True)
+    out = capsys.readouterr().out
+
+    assert "filtro_eludible" not in out
+
+
+def test_render_clean_plan_shows_what_will_be_removed_and_kept(capsys, tmp_path):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True, markup=False)
+    cache_path = tmp_path / "build"
+
+    render_clean_plan(
+        console, to_remove=["lynceus-target:aaa"], kept=["lynceus-target:bbb"], cache_path=cache_path, plain=True,
+    )
+    out = capsys.readouterr().out
+
+    assert "a-borrar" in out
+    assert "lynceus-target:aaa" in out
+    assert "a-conservar" in out
+    assert "lynceus-target:bbb" in out
+    assert str(cache_path) in out
+
+
+def test_render_clean_plan_omits_cache_line_when_cache_path_is_none(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+
+    render_clean_plan(console, to_remove=[], kept=[], cache_path=None, plain=True)
+    out = capsys.readouterr().out
+
+    assert "caché" not in out
+
+
+def test_render_clean_images_lists_tag_and_size(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    images = [TargetImage(tag="lynceus-target:abcdef123456", size="123MB")]
+
+    render_clean_images(console, images, plain=True)
+    out = capsys.readouterr().out
+
+    assert "lynceus-target:abcdef123456" in out
+    assert "123MB" in out
+
+
+def test_render_clean_images_empty(capsys):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+
+    render_clean_images(console, [], plain=True)
+    out = capsys.readouterr().out
+
+    assert "ninguna imagen" in out
+
+
+def test_render_clean_result_shows_removed_kept_failed_and_cache(capsys, tmp_path):
+    console = Console(no_color=True, force_terminal=False, soft_wrap=True)
+    cache_path = tmp_path / "build"
+
+    render_clean_result(
+        console, removed=["lynceus-target:aaa"], kept=["lynceus-target:bbb"],
+        failed=["lynceus-target:ccc"], cache_path=cache_path, plain=True,
+    )
+    out = capsys.readouterr().out
+
+    assert "lynceus-target:aaa" in out
+    assert "lynceus-target:bbb" in out
+    assert "lynceus-target:ccc" in out
+    assert str(cache_path) in out

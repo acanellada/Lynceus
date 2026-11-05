@@ -28,6 +28,12 @@ from lynceus_sec.validator.runner import (
 
 RESOLVER_IMAGE = "lynceus-resolver:0.1"
 
+# Forma de las etiquetas que genera `compute_target_tag`: `lynceus-target:`
+# seguido de 12 caracteres hexadecimales. Pública (usada también por
+# `cli._validate_target_image` y por `validator.clean`) para no duplicar el
+# patrón en cada sitio que necesita reconocer una imagen objetivo.
+TARGET_IMAGE_RE = re.compile(r"^lynceus-target:[0-9a-f]{12}$")
+
 RESOLVED_REQUIREMENTS_NAME = "requirements.resolved.txt"
 WHEELS_DIRNAME = "wheels"
 DOCKERFILE_NAME = "Dockerfile"
@@ -148,15 +154,22 @@ def cache_id(target: Path, requirements: str, resolve_date: str | None) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
-def default_cache_root() -> Path:
-    """Base de la caché de `lynceus build`: `$LYNCEUS_CACHE_DIR/build` si la
-    variable está definida, si no `~/.cache/lynceus/build`. Se resuelve en
-    cada llamada (no en un `Path` fijado al importar el módulo) para que los
-    tests puedan apuntarla a un directorio temporal vía variable de entorno,
-    sin tocar nunca la caché real del usuario."""
+def cache_base_dir() -> Path:
+    """Base de la caché de Lynceus, antes de añadir `"build"`:
+    `$LYNCEUS_CACHE_DIR` si la variable está definida, si no
+    `~/.cache/lynceus`. Se resuelve en cada llamada (no en un `Path` fijado
+    al importar el módulo) para que los tests puedan apuntarla a un
+    directorio temporal vía variable de entorno, sin tocar nunca la caché
+    real del usuario. Expuesta además de `default_cache_root()` porque
+    `validator.clean` necesita validar esta base (no solo la subcarpeta
+    `build`) antes de borrar nada."""
     base = os.environ.get("LYNCEUS_CACHE_DIR")
-    root = Path(base) if base else Path.home() / ".cache" / "lynceus"
-    return root / "build"
+    return Path(base) if base else Path.home() / ".cache" / "lynceus"
+
+
+def default_cache_root() -> Path:
+    """Subcarpeta `build` de la caché de Lynceus (ver `cache_base_dir`)."""
+    return cache_base_dir() / "build"
 
 
 def cache_dir_for(

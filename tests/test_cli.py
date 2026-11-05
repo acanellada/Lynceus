@@ -1,6 +1,8 @@
 import json
 import re
+import subprocess
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +12,7 @@ from lynceus_sec.cli import app
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator import build as build_mod
+from lynceus_sec.validator import clean as clean_mod
 from lynceus_sec.validator.bench import CLASS_CONFIG, BenchResult
 
 runner = CliRunner()
@@ -479,6 +482,51 @@ def test_scan_plain_shows_capability_section_and_explanation(case_dir):
     assert "No es un fallo de implementación" in result.stdout
 
 
+def test_scan_json_includes_bypassable_filter_fields(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    capability = _capability()
+    capability["bypassable_filter"] = True
+    capability["blocked_techniques"] = ["shell_pipe_bare"]
+    with _patched_validators(cmdi_result=([], [], [capability])):
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--plain", "--classes", "command_injection", "--json", str(json_path)],
+        )
+    assert result.exit_code == 0
+    payload = json.loads(json_path.read_text())
+
+    cap = payload["capabilities"]["command_injection"][0]
+    assert cap["bypassable_filter"] is True
+    assert cap["blocked_techniques"] == ["shell_pipe_bare"]
+    assert payload["schema_version"] == 2
+
+
+def test_scan_json_capability_defaults_bypassable_filter_false_when_absent(case_dir, tmp_path):
+    json_path = tmp_path / "out.json"
+    with _patched_validators(cmdi_result=([], [], [_capability()])):
+        result = runner.invoke(
+            app, ["scan", str(case_dir), "--plain", "--classes", "command_injection", "--json", str(json_path)],
+        )
+    assert result.exit_code == 0
+    payload = json.loads(json_path.read_text())
+
+    cap = payload["capabilities"]["command_injection"][0]
+    assert cap["bypassable_filter"] is False
+    assert cap["blocked_techniques"] == []
+
+
+def test_scan_plain_shows_bypassable_filter_note(case_dir):
+    capability = _capability()
+    capability["bypassable_filter"] = True
+    capability["blocked_techniques"] = ["shell_pipe_bare"]
+    with _patched_validators(cmdi_result=([], [], [capability])):
+        result = runner.invoke(app, ["scan", str(case_dir), "--plain", "--classes", "command_injection"])
+
+    assert result.exit_code == 0
+    assert "filtro_eludible" in result.stdout
+    assert "shell_semicolon_bare" in result.stdout
+    assert "shell_pipe_bare" in result.stdout
+
+
 def test_scan_html_report_is_written(case_dir, tmp_path):
     report_path = tmp_path / "out.html"
     with _patched_validators():
@@ -612,6 +660,232 @@ def test_build_help_lists_options():
         assert option in output
 
 
+# -- clean --------------------------------------------------------------------
+
+def _raise(exc):
+    def _inner(*args, **kwargs):
+        raise exc
+    return _inner
+
+
+def _patched_clean(
+    *,
+    docker_responding_error=None,
+    cache_safety_error=None,
+    images=(),
+    remove_images_result=([], []),
+    cache_path=Path("/tmp/fake-cache/build"),
+    removed_cache_path=Path("/tmp/fake-cache/build"),
+):
+    """Mockea las cuatro llamadas de `validator.clean` que usa el comando
+    `clean`, con las dos validaciones (`ensure_docker_responding`,
+    `ensure_cache_removal_is_safe`) separadas de las dos acciones
+    (`list_target_images`, `remove_images`, `remove_cache_dir`), igual que
+    en el propio comando."""
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.ensure_docker_responding",
+        side_effect=_raise(docker_responding_error) if docker_responding_error else lambda: None,
+    ))
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.ensure_cache_removal_is_safe",
+        side_effect=_raise(cache_safety_error) if cache_safety_error else lambda: cache_path,
+    ))
+    list_mock = stack.enter_context(
+        patch("lynceus_sec.cli.clean_mod.list_target_images", return_value=list(images))
+    )
+    remove_images_mock = stack.enter_context(
+        patch("lynceus_sec.cli.clean_mod.remove_images", return_value=remove_images_result)
+    )
+    remove_cache_mock = stack.enter_context(
+        patch("lynceus_sec.cli.clean_mod.remove_cache_dir", return_value=removed_cache_path)
+    )
+    return stack, list_mock, remove_images_mock, remove_cache_mock
+
+
+def test_clean_without_yes_only_lists_and_removes_nothing():
+    images = [clean_mod.TargetImage(tag="lynceus-target:abcdef123456", size="10MB")]
+    stack, _, remove_images_mock, remove_cache_mock = _patched_clean(images=images)
+    with stack:
+        result = runner.invoke(app, ["clean", "--plain"])
+
+    assert result.exit_code == 0
+    assert "lynceus-target:abcdef123456" in result.stdout
+    assert "10MB" in result.stdout
+    remove_images_mock.assert_not_called()
+    remove_cache_mock.assert_not_called()
+
+
+def test_clean_without_yes_never_validates_cache_safety():
+    """Sin --yes no se borra nada, así que no hace falta validar la caché."""
+    images = [clean_mod.TargetImage(tag="lynceus-target:abcdef123456", size="10MB")]
+    stack = ExitStack()
+    stack.enter_context(patch("lynceus_sec.cli.clean_mod.ensure_docker_responding", return_value=None))
+    cache_safety_mock = stack.enter_context(
+        patch("lynceus_sec.cli.clean_mod.ensure_cache_removal_is_safe", side_effect=AssertionError("no debería llamar"))
+    )
+    stack.enter_context(patch("lynceus_sec.cli.clean_mod.list_target_images", return_value=images))
+    with stack:
+        result = runner.invoke(app, ["clean", "--plain"])
+
+    assert result.exit_code == 0
+    cache_safety_mock.assert_not_called()
+
+
+def test_clean_validates_before_listing_or_removing_anything():
+    """Orden exigido: primero las dos validaciones, luego listar/filtrar
+    --keep, y solo al final borrar."""
+    call_order = []
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.ensure_docker_responding",
+        side_effect=lambda: call_order.append("ensure_docker_responding"),
+    ))
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.ensure_cache_removal_is_safe",
+        side_effect=lambda: call_order.append("ensure_cache_removal_is_safe") or Path("/tmp/fake-cache/build"),
+    ))
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.list_target_images",
+        side_effect=lambda: call_order.append("list_target_images") or [],
+    ))
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.remove_images",
+        side_effect=lambda tags: call_order.append("remove_images") or ([], []),
+    ))
+    stack.enter_context(patch(
+        "lynceus_sec.cli.clean_mod.remove_cache_dir",
+        side_effect=lambda: call_order.append("remove_cache_dir") or Path("/tmp/fake-cache/build"),
+    ))
+    with stack:
+        result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 0
+    assert call_order == [
+        "ensure_docker_responding", "ensure_cache_removal_is_safe",
+        "list_target_images", "remove_images", "remove_cache_dir",
+    ]
+
+
+def test_clean_with_yes_removes_images_and_cache():
+    images = [
+        clean_mod.TargetImage(tag="lynceus-target:aaaaaaaaaaaa", size="10MB"),
+        clean_mod.TargetImage(tag="lynceus-target:bbbbbbbbbbbb", size="20MB"),
+    ]
+    stack, _, remove_images_mock, _ = _patched_clean(
+        images=images,
+        remove_images_result=(["lynceus-target:aaaaaaaaaaaa", "lynceus-target:bbbbbbbbbbbb"], []),
+        removed_cache_path=Path("/tmp/fake-cache/build"),
+    )
+    with stack:
+        result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 0
+    remove_images_mock.assert_called_once_with(["lynceus-target:aaaaaaaaaaaa", "lynceus-target:bbbbbbbbbbbb"])
+    assert "lynceus-target:aaaaaaaaaaaa" in result.stdout
+    assert "/tmp/fake-cache/build" in result.stdout
+
+
+def test_clean_shows_plan_before_removing():
+    images = [clean_mod.TargetImage(tag="lynceus-target:aaaaaaaaaaaa", size="10MB")]
+    stack, _, _, _ = _patched_clean(
+        images=images, remove_images_result=(["lynceus-target:aaaaaaaaaaaa"], []),
+    )
+    with stack:
+        result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 0
+    assert "a-borrar" in result.stdout
+    assert "lynceus-target:aaaaaaaaaaaa" in result.stdout
+
+
+def test_clean_keeps_images_matching_keep_option_and_never_removes_them():
+    images = [
+        clean_mod.TargetImage(tag="lynceus-target:aaaaaaaaaaaa", size="10MB"),
+        clean_mod.TargetImage(tag="lynceus-target:bbbbbbbbbbbb", size="20MB"),
+    ]
+    stack, _, remove_images_mock, _ = _patched_clean(
+        images=images, remove_images_result=(["lynceus-target:bbbbbbbbbbbb"], []), removed_cache_path=None,
+    )
+    with stack:
+        result = runner.invoke(
+            app, ["clean", "--yes", "--keep", "lynceus-target:aaaaaaaaaaaa", "--plain"],
+        )
+
+    assert result.exit_code == 0
+    remove_images_mock.assert_called_once_with(["lynceus-target:bbbbbbbbbbbb"])
+    called_tags = remove_images_mock.call_args.args[0]
+    assert "lynceus-target:aaaaaaaaaaaa" not in called_tags
+    assert "lynceus-target:aaaaaaaaaaaa" in result.stdout  # conservada
+
+
+def test_clean_exit_code_2_when_docker_not_responding_and_removes_nothing():
+    stack, list_mock, remove_images_mock, remove_cache_mock = _patched_clean(
+        docker_responding_error=clean_mod.CleanError("Docker no responde: ¿está en marcha?"),
+    )
+    with stack:
+        result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 2
+    assert "Docker no responde" in result.stdout
+    list_mock.assert_not_called()
+    remove_images_mock.assert_not_called()
+    remove_cache_mock.assert_not_called()
+
+
+def test_clean_exit_code_2_when_cache_is_unsafe_and_removes_no_image():
+    """Regresión: antes, con una caché insegura, `clean --yes` borraba todas
+    las imágenes y solo después fallaba al intentar borrar la caché. Ahora
+    la validación de la caché va antes que cualquier `docker rmi`."""
+    stack, list_mock, remove_images_mock, remove_cache_mock = _patched_clean(
+        cache_safety_error=clean_mod.CleanError(
+            "La base de la caché de Lynceus es el directorio personal; se niega a borrar nada por seguridad."
+        ),
+    )
+    with stack:
+        result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 2
+    assert "directorio personal" in result.stdout
+    list_mock.assert_not_called()
+    remove_images_mock.assert_not_called()
+    remove_cache_mock.assert_not_called()
+
+
+def test_clean_end_to_end_with_lynceus_cache_dir_at_home_never_calls_docker_rmi(monkeypatch, tmp_path):
+    """Regresión con el escenario real reportado (`LYNCEUS_CACHE_DIR=$HOME`,
+    simulado con tmp_path): usa las funciones reales de `validator.clean`
+    (solo se mockea `subprocess.run` y `Path.home`), y comprueba que ni
+    `docker images` ni `docker rmi` llegan a ejecutarse."""
+    monkeypatch.setenv("LYNCEUS_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    docker_calls = []
+
+    def fake_run(cmd, **kwargs):
+        docker_calls.append(cmd)
+        if cmd[:2] == ["docker", "info"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = runner.invoke(app, ["clean", "--yes", "--plain"])
+
+    assert result.exit_code == 2
+    assert "directorio personal" in result.stdout
+    assert not any(cmd[:2] == ["docker", "images"] for cmd in docker_calls)
+    assert not any(cmd[:2] == ["docker", "rmi"] for cmd in docker_calls)
+
+
+def test_clean_help_lists_options():
+    result = runner.invoke(app, ["clean", "--help"])
+    assert result.exit_code == 0
+    output = _strip_ansi(result.stdout)
+    for option in ("--yes", "--keep", "--plain"):
+        assert option in output
+
+
 # -- ayuda --------------------------------------------------------------------
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -627,6 +901,7 @@ def test_root_help_lists_commands():
     assert result.exit_code == 0
     assert "scan" in result.stdout
     assert "build" in result.stdout
+    assert "clean" in result.stdout
     assert "bench" in result.stdout
 
 

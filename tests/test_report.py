@@ -7,6 +7,8 @@ from lynceus_sec.report import (
     format_calls,
     format_reproduction,
     group_findings,
+    positive_control_summary_phrase,
+    summarize_positive_controls,
 )
 
 
@@ -135,3 +137,33 @@ def test_format_calls_handles_missing_calls():
 def test_ssrf_receiver_note_mentions_temporary_setup_and_reproduction():
     assert "temporal" in SSRF_RECEIVER_NOTE
     assert "receptor propio" in SSRF_RECEIVER_NOTE
+
+
+def test_summarize_positive_controls_counts_and_filters_confirmed():
+    positive_controls = {
+        "path_traversal": [
+            {"tool": "read_doc", "parameter": "name", "status": "confirmed"},
+            {"tool": "read_doc", "parameter": "other", "status": "not_confirmed"},
+            {"tool": "read_doc", "parameter": "third", "status": "inconclusive"},
+        ]
+    }
+
+    confirmed_count, total, confirmed_items = summarize_positive_controls(positive_controls)
+
+    assert confirmed_count == 1
+    assert total == 3
+    assert [item.get("parameter") for _, item in confirmed_items] == ["name"]
+
+
+def test_summarize_positive_controls_empty():
+    assert summarize_positive_controls({}) == (0, 0, [])
+
+
+def test_positive_control_summary_phrase_matches_the_requested_example():
+    assert positive_control_summary_phrase(1, 16) == "1 de 16 parámetros devuelve contenido dentro del límite"
+
+
+def test_positive_control_summary_phrase_singular_total_and_plural_confirmed():
+    assert positive_control_summary_phrase(1, 1) == "1 de 1 parámetro devuelve contenido dentro del límite"
+    assert positive_control_summary_phrase(0, 1) == "0 de 1 parámetro devuelven contenido dentro del límite"
+    assert positive_control_summary_phrase(2, 5) == "2 de 5 parámetros devuelven contenido dentro del límite"

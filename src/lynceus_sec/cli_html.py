@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from lynceus_sec.cli_env import EnvironmentInfo
 from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
+    BYPASSABLE_FILTER_EXPLANATION,
     CAPABILITY_EXPLANATION,
     CLASS_LABELS,
     SEVERITY_LABELS,
@@ -27,6 +28,8 @@ from lynceus_sec.report import (
     count_phrase,
     format_reproduction,
     group_findings,
+    positive_control_summary_phrase,
+    summarize_positive_controls,
 )
 
 _CSP = "default-src 'none'; style-src 'unsafe-inline'"
@@ -113,6 +116,7 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-
 .confirmations { list-style: none; margin: 0; padding: 0; }
 .confirmations li { margin-bottom: 0.5rem; }
 .confirmations li:last-child { margin-bottom: 0; }
+.filter-note { color: var(--yellow); font-weight: 600; margin: 0.5rem 0 0.2rem; }
 """
 
 
@@ -177,20 +181,20 @@ def _inconclusive_rows(inconclusive_by_class: dict[str, list[dict]]) -> str:
     return "".join(rows)
 
 
-def _positive_control_rows(positive_controls_by_class: dict[str, list[dict]]) -> str:
-    """Control positivo informativo de path traversal: no cambia la
-    clasificación de ninguna vulnerabilidad, solo da contexto."""
-    all_items = [(class_name, item) for class_name, items in positive_controls_by_class.items() for item in items]
-    if not all_items:
-        return '<tr><td colspan="4" class="muted">Sin controles positivos.</td></tr>'
+def _positive_control_rows(confirmed_items: list[tuple[str, dict]]) -> str:
+    """Solo los confirmados: ¿puede la misma tool/parámetro leer siquiera un
+    fichero normal dentro del límite? No cambia la clasificación de ninguna
+    vulnerabilidad, solo da contexto. El detalle completo (también los no
+    confirmados) solo va al JSON."""
+    if not confirmed_items:
+        return '<tr><td colspan="3" class="muted">Ningún parámetro confirmado.</td></tr>'
     rows = []
-    for class_name, item in all_items:
+    for class_name, item in confirmed_items:
         rows.append(
             "<tr>"
             f"<td>{html.escape(CLASS_LABELS.get(class_name, class_name))}</td>"
             f"<td class=\"mono\">{html.escape(str(item.get('tool', '')))}</td>"
             f"<td class=\"mono\">{html.escape(str(item.get('parameter', '')))}</td>"
-            f"<td>{html.escape(str(item.get('status', '')))}</td>"
             "</tr>"
         )
     return "".join(rows)
@@ -208,7 +212,16 @@ def _capability_confirmations_list(item: dict) -> str:
         call = html.escape(format_reproduction(confirmation.get("reproduction")))
         evidence = html.escape(confirmation.get("evidence") or "")
         rows.append(f"<li><strong>{technique}</strong> &rarr; <span class=\"mono\">{call}</span><br>{evidence}</li>")
-    return f'<ul class="confirmations">{"".join(rows)}</ul>'
+    list_html = f'<ul class="confirmations">{"".join(rows)}</ul>'
+
+    if item.get("bypassable_filter"):
+        eluding = html.escape(", ".join(c.get("technique") or "" for c in item.get("confirmations", [])))
+        blocking = html.escape(", ".join(item.get("blocked_techniques", [])))
+        list_html += (
+            f'<p class="filter-note">⚠️ Filtro eludible: eluden {eluding}; bloquea {blocking}.</p>'
+            f'<p class="muted">{html.escape(BYPASSABLE_FILTER_EXPLANATION)}</p>'
+        )
+    return list_html
 
 
 def _capabilities_rows(capabilities_by_class: dict[str, list[dict]]) -> str:
@@ -270,6 +283,9 @@ def build_html_report(
     techniques_phrase = count_phrase(techniques_confirmed, "técnica", "técnicas")
     inconclusive_phrase = count_phrase(inconclusive_count, "intento inconcluso", "intentos inconclusos")
 
+    pc_confirmed_count, pc_total, pc_confirmed_items = summarize_positive_controls(positive_controls_by_class)
+    positive_control_phrase = positive_control_summary_phrase(pc_confirmed_count, pc_total)
+
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -320,9 +336,10 @@ def build_html_report(
     <h2>🧭 Controles positivos (informativo)</h2>
     <p class="muted">¿Puede la misma tool/parámetro leer siquiera un fichero normal dentro del
        límite? No cambia la clasificación de ninguna vulnerabilidad.</p>
+    <p>{html.escape(positive_control_phrase)}</p>
     <table>
-      <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th><th>Estado</th></tr></thead>
-      <tbody>{_positive_control_rows(positive_controls_by_class)}</tbody>
+      <thead><tr><th>Clase</th><th>Herramienta</th><th>Parámetro</th></tr></thead>
+      <tbody>{_positive_control_rows(pc_confirmed_items)}</tbody>
     </table>
   </section>
 

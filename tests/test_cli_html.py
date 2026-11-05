@@ -207,7 +207,23 @@ def test_html_report_escapes_malicious_positive_control_fields():
     )
     assert "<b>x</b>" not in html_out
     assert "&lt;b&gt;x&lt;/b&gt;" in html_out
-    assert "confirmed" in html_out
+
+
+def test_html_report_positive_controls_show_summary_and_only_confirmed():
+    positive_controls = {
+        "path_traversal": [
+            {"tool": "read_doc", "parameter": "name", "status": "confirmed"},
+            {"tool": "read_doc", "parameter": "other", "status": "not_confirmed"},
+        ]
+    }
+    html_out = build_html_report(
+        target="/tmp/case", classes=["path_traversal"], findings=[],
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class=positive_controls,
+        capabilities_by_class={}, elapsed_seconds=1.0, environment=ENV,
+    )
+    assert "1 de 2 parámetros devuelve contenido dentro del límite" in html_out
+    assert ">name<" in html_out
+    assert ">other<" not in html_out
 
 
 def test_html_report_shows_capability_section_with_reproduction_and_explanation():
@@ -246,3 +262,68 @@ def test_html_report_shows_capability_section_with_reproduction_and_explanation(
     assert "touch /tmp/probe" in html_out
     assert "shell_semicolon_bare" in html_out
     assert "No es un fallo de implementación" in html_out
+
+
+def test_html_report_shows_bypassable_filter_note_with_eluding_and_blocked_techniques():
+    capabilities = {
+        "command_injection": [
+            {
+                "tool": "run_shell",
+                "parameter": "command",
+                "probe": None,
+                "confirmations": [
+                    {
+                        "technique": "shell_semicolon_bare",
+                        "payload": "; touch /tmp/inj",
+                        "evidence": "Canario creado en /tmp/inj",
+                        "reproduction": [
+                            ReproductionCall(tool="run_shell", arguments={"command": "; touch /tmp/inj"})
+                        ],
+                    }
+                ],
+                "blocked_techniques": ["shell_pipe_bare"],
+                "bypassable_filter": True,
+            }
+        ]
+    }
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection"], findings=[],
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={},
+        capabilities_by_class=capabilities, elapsed_seconds=1.0, environment=ENV,
+    )
+
+    assert "Filtro eludible" in html_out
+    assert "shell_semicolon_bare" in html_out
+    assert "shell_pipe_bare" in html_out
+    assert "se puede saltar" in html_out
+
+
+def test_html_report_omits_bypassable_filter_note_when_not_set():
+    capabilities = {
+        "command_injection": [
+            {
+                "tool": "run_shell",
+                "parameter": "command",
+                "probe": None,
+                "confirmations": [
+                    {
+                        "technique": "shell_semicolon_bare",
+                        "payload": "; touch /tmp/inj",
+                        "evidence": "Canario creado en /tmp/inj",
+                        "reproduction": [
+                            ReproductionCall(tool="run_shell", arguments={"command": "; touch /tmp/inj"})
+                        ],
+                    }
+                ],
+                "blocked_techniques": [],
+                "bypassable_filter": False,
+            }
+        ]
+    }
+    html_out = build_html_report(
+        target="/tmp/case", classes=["command_injection"], findings=[],
+        inconclusive_by_class={}, fs_root="/tmp/lynceus-root", positive_controls_by_class={},
+        capabilities_by_class=capabilities, elapsed_seconds=1.0, environment=ENV,
+    )
+
+    assert "Filtro eludible" not in html_out

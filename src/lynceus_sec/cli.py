@@ -11,7 +11,6 @@ error (argumentos inválidos o fallo resolviendo/construyendo).
 from __future__ import annotations
 
 import json as jsonlib
-import re
 import time
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version
@@ -27,6 +26,9 @@ from lynceus_sec.cli_render import (
     make_console,
     render_build_result,
     render_capabilities,
+    render_clean_images,
+    render_clean_plan,
+    render_clean_result,
     render_findings_table,
     render_fs_root,
     render_header,
@@ -43,6 +45,7 @@ from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, Label
 from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
 from lynceus_sec.validator import build as build_mod
+from lynceus_sec.validator import clean as clean_mod
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
@@ -56,8 +59,6 @@ from lynceus_sec.validator.runner import (
     _docker_responding,
     _image_exists,
 )
-
-_TARGET_IMAGE_RE = re.compile(r"^lynceus-target:[0-9a-f]{12}$")
 
 app = typer.Typer(
     name="lynceus",
@@ -164,7 +165,7 @@ def _validate_target_image(value: str | None, console) -> str | None:
     y existir ya en local; si no se da (`None`), `scan` se comporta como hoy."""
     if value is None:
         return None
-    if not _TARGET_IMAGE_RE.fullmatch(value):
+    if not build_mod.TARGET_IMAGE_RE.fullmatch(value):
         console.print(
             f"Error: --image {value!r} debe tener la forma 'lynceus-target:' "
             "seguido de 12 caracteres hexadecimales."
@@ -210,6 +211,8 @@ def _serialize_capabilities(capabilities_by_class: dict[str, list[dict]]) -> dic
                     _serialize_capability_confirmation(confirmation)
                     for confirmation in item.get("confirmations", [])
                 ],
+                "bypassable_filter": item.get("bypassable_filter", False),
+                "blocked_techniques": item.get("blocked_techniques", []),
             }
             for item in items
         ]
@@ -463,6 +466,52 @@ def build(
         raise typer.Exit(2)
 
     render_build_result(console, result, plain=plain_mode)
+    raise typer.Exit(0)
+
+
+@app.command()
+def clean(
+    yes: bool = typer.Option(
+        False, "--yes", help="Borra las imágenes y la caché de build en vez de solo listarlas.",
+    ),
+    keep: list[str] = typer.Option(  # noqa: B008 - patrón estándar de typer
+        [], "--keep", help="Etiqueta 'lynceus-target:<hash>' a conservar (repetible).",
+    ),
+    plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
+) -> None:
+    """Lista las imágenes lynceus-target:* locales (con --yes, las borra junto
+    con la caché de construcción de Lynceus). Nunca toca lynceus-sandbox ni
+    lynceus-resolver ni ninguna otra imagen."""
+    plain_mode = is_plain_mode(plain_flag=plain)
+    console = make_console(plain=plain_mode)
+    render_header(console, version=_lynceus_version(), plain=plain_mode)
+
+    # Toda validación va antes que cualquier borrado: con --yes, ni una
+    # imagen ni la caché se tocan hasta que Docker responde y la ruta de la
+    # caché es segura de borrar.
+    try:
+        clean_mod.ensure_docker_responding()
+        cache_path = clean_mod.ensure_cache_removal_is_safe() if yes else None
+    except clean_mod.CleanError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(2)
+
+    images = clean_mod.list_target_images()
+    render_clean_images(console, images, plain=plain_mode)
+
+    if not yes:
+        raise typer.Exit(0)
+
+    to_remove = [image.tag for image in images if image.tag not in keep]
+    kept = [image.tag for image in images if image.tag in keep]
+    render_clean_plan(console, to_remove=to_remove, kept=kept, cache_path=cache_path, plain=plain_mode)
+
+    removed, failed = clean_mod.remove_images(to_remove)
+    removed_cache = clean_mod.remove_cache_dir()
+
+    render_clean_result(
+        console, removed=removed, kept=kept, failed=failed, cache_path=removed_cache, plain=plain_mode,
+    )
     raise typer.Exit(0)
 
 

@@ -24,6 +24,14 @@ jobs:
       - name: Instalar uv (versión fijada)
         run: python -m pip install "uv==0.13.4"
 
+      - name: Cachear descargas de uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
       - name: Instalar dependencias desde uv.lock
         run: uv sync --locked
 

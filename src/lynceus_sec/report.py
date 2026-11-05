@@ -30,10 +30,36 @@ SSRF_RECEIVER_NOTE = (
     "por un receptor propio."
 )
 
+def summarize_positive_controls(
+    positive_controls_by_class: dict[str, list[dict]],
+) -> tuple[int, int, list[tuple[str, dict]]]:
+    """(confirmados, total, [(clase, item) solo los confirmados]), en orden
+    de aparición. Compartido por terminal y HTML: ambos muestran solo el
+    resumen y los confirmados; el JSON sigue exponiendo el detalle completo
+    (`positive_controls_by_class` tal cual)."""
+    all_items = [(class_name, item) for class_name, items in positive_controls_by_class.items() for item in items]
+    confirmed = [(class_name, item) for class_name, item in all_items if item.get("status") == "confirmed"]
+    return len(confirmed), len(all_items), confirmed
+
+
+def positive_control_summary_phrase(confirmed: int, total: int) -> str:
+    """P.ej. "1 de 16 parámetros devuelve contenido dentro del límite": el
+    plural de "parámetro(s)" depende del total, el verbo
+    "devuelve"/"devuelven" del número de confirmados (no del total)."""
+    total_word = "parámetro" if total == 1 else "parámetros"
+    verb = "devuelve" if confirmed == 1 else "devuelven"
+    return f"{confirmed} de {total} {total_word} {verb} contenido dentro del límite"
+
+
 CAPABILITY_EXPLANATION = (
     "No es un fallo de implementación: la herramienta ejecuta comandos por "
     "diseño. Un agente manipulado podría usar esta capacidad para ejecutar "
     "comandos arbitrarios."
+)
+
+BYPASSABLE_FILTER_EXPLANATION = (
+    "La herramienta intenta restringir los comandos, pero la restricción se "
+    "puede saltar. Sigue sin contar como vulnerabilidad."
 )
 
 

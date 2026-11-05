@@ -219,6 +219,103 @@ def test_unconfirmed_probe_does_not_create_a_capability():
     assert len(findings) == 1
 
 
+# --- filtro eludible: mezcla de técnicas confirmadas y bloqueadas ---------
+
+
+def test_mixed_confirmed_and_blocked_shell_metacharacter_marks_bypassable_filter():
+    probe = _attempt("probe-1", kind="probe", technique="capability_probe", canary_path="/tmp/probe")
+    confirmed_injection = _attempt("inj-1", technique="shell_semicolon_bare", kind="injection")
+    blocked_injection = _attempt("inj-2", technique="shell_pipe_bare", kind="injection")
+    attempts = [probe, confirmed_injection, blocked_injection]
+    results = [
+        {"id": "probe-1", "status": "confirmed", "detail": None},
+        {"id": "inj-1", "status": "confirmed", "detail": None},
+        {"id": "inj-2", "status": "not_confirmed", "detail": None},
+    ]
+
+    _, _, capabilities = attempts_to_findings("cmdi-01-vulnerable", attempts, results)
+
+    capability = capabilities[0]
+    assert capability["blocked_techniques"] == ["shell_pipe_bare"]
+    assert capability["bypassable_filter"] is True
+
+
+def test_all_techniques_confirmed_is_not_a_bypassable_filter():
+    """Todo confirmado: sin restricción, no hay nada que eludir."""
+    probe = _attempt("probe-1", kind="probe", technique="capability_probe", canary_path="/tmp/probe")
+    confirmed_injection = _attempt("inj-1", technique="shell_semicolon_bare", kind="injection")
+    attempts = [probe, confirmed_injection]
+    results = [
+        {"id": "probe-1", "status": "confirmed", "detail": None},
+        {"id": "inj-1", "status": "confirmed", "detail": None},
+    ]
+
+    _, _, capabilities = attempts_to_findings("cmdi-01-vulnerable", attempts, results)
+
+    capability = capabilities[0]
+    assert capability["blocked_techniques"] == []
+    assert capability["bypassable_filter"] is False
+
+
+def test_only_shell_and_not_confirmed_does_not_mark_bypassable_filter():
+    """`&&` solo encadena si el comando anterior tiene éxito: que no se
+    confirme es semántica normal de shell, no evidencia de un filtro."""
+    probe = _attempt("probe-1", kind="probe", technique="capability_probe", canary_path="/tmp/probe")
+    confirmed_injection = _attempt("inj-1", technique="shell_semicolon_bare", kind="injection")
+    and_injection = _attempt("inj-2", technique="shell_and_bare", kind="injection")
+    attempts = [probe, confirmed_injection, and_injection]
+    results = [
+        {"id": "probe-1", "status": "confirmed", "detail": None},
+        {"id": "inj-1", "status": "confirmed", "detail": None},
+        {"id": "inj-2", "status": "not_confirmed", "detail": None},
+    ]
+
+    _, _, capabilities = attempts_to_findings("cmdi-01-vulnerable", attempts, results)
+
+    capability = capabilities[0]
+    assert capability["blocked_techniques"] == []
+    assert capability["bypassable_filter"] is False
+
+
+def test_argument_injection_not_confirmed_does_not_count_as_blocked():
+    """No depende de ningún metacaracter de shell: que no se confirme no
+    demuestra que haya un filtro."""
+    probe = _attempt("probe-1", kind="probe", technique="capability_probe", canary_path="/tmp/probe")
+    confirmed_injection = _attempt("inj-1", technique="shell_semicolon_bare", kind="injection")
+    arg_injection = _attempt("inj-2", technique="argument_injection_output_bare", kind="injection")
+    attempts = [probe, confirmed_injection, arg_injection]
+    results = [
+        {"id": "probe-1", "status": "confirmed", "detail": None},
+        {"id": "inj-1", "status": "confirmed", "detail": None},
+        {"id": "inj-2", "status": "not_confirmed", "detail": None},
+    ]
+
+    _, _, capabilities = attempts_to_findings("cmdi-01-vulnerable", attempts, results)
+
+    capability = capabilities[0]
+    assert capability["blocked_techniques"] == []
+    assert capability["bypassable_filter"] is False
+
+
+def test_inconclusive_blockable_technique_never_counts_as_blocked():
+    probe = _attempt("probe-1", kind="probe", technique="capability_probe", canary_path="/tmp/probe")
+    confirmed_injection = _attempt("inj-1", technique="shell_semicolon_bare", kind="injection")
+    inconclusive_injection = _attempt("inj-2", technique="shell_pipe_bare", kind="injection")
+    attempts = [probe, confirmed_injection, inconclusive_injection]
+    results = [
+        {"id": "probe-1", "status": "confirmed", "detail": None},
+        {"id": "inj-1", "status": "confirmed", "detail": None},
+        {"id": "inj-2", "status": "inconclusive", "detail": "TimeoutError: ..."},
+    ]
+
+    _, inconclusive, capabilities = attempts_to_findings("cmdi-01-vulnerable", attempts, results)
+
+    capability = capabilities[0]
+    assert capability["blocked_techniques"] == []
+    assert capability["bypassable_filter"] is False
+    assert len(inconclusive) == 1
+
+
 # --- validate_case: --image / --server-python se reenvían a run_harness ---
 
 

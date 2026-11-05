@@ -25,6 +25,27 @@ from lynceus_sec.validator.runner import (
     run_validate,
 )
 
+# Técnicas cuyo `not_confirmed` sí indica que una restricción las bloqueó
+# (dependen de un metacaracter de shell que un filtro podría interceptar).
+# Quedan fuera "shell_and" (`&&` solo encadena si el comando anterior tiene
+# éxito: que no se confirme es la semántica normal de shell, no evidencia de
+# un filtro) y "argument_injection_output" (no depende de ningún
+# metacaracter). Nombres base, sin el sufijo "_bare"/"_prefixed" que añade
+# `payloads.build_payloads`.
+_BLOCKABLE_BASE_TECHNIQUES = {
+    "shell_semicolon",
+    "shell_pipe",
+    "shell_newline",
+    "command_substitution",
+    "backticks",
+}
+
+
+def _is_blockable_technique(technique: str) -> bool:
+    base = technique.removesuffix("_bare").removesuffix("_prefixed")
+    return base in _BLOCKABLE_BASE_TECHNIQUES
+
+
 _NEUTRAL_BY_TYPE: dict[str, Any] = {
     "string": "lynceus",
     "integer": 0,
@@ -136,7 +157,10 @@ def attempts_to_findings(
         key = (attempt["tool"], attempt["parameter"])
         return capabilities_by_key.setdefault(
             key,
-            {"tool": attempt["tool"], "parameter": attempt["parameter"], "probe": None, "confirmations": []},
+            {
+                "tool": attempt["tool"], "parameter": attempt["parameter"], "probe": None,
+                "confirmations": [], "blocked_techniques": [],
+            },
         )
 
     for attempt in attempts:
@@ -184,9 +208,19 @@ def attempts_to_findings(
                 )
         elif status == "inconclusive":
             inconclusive.append({**attempt, **result})
-        # not_confirmed: resultado negativo normal, ni Finding ni informe aparte
+        elif key in capability_keys and _is_blockable_technique(attempt["technique"]):
+            # not_confirmed, pero sobre una capacidad y con una técnica que
+            # depende de un metacaracter de shell: la restricción la bloqueó.
+            _capability_entry(attempt)["blocked_techniques"].append(attempt["technique"])
+        # not_confirmed fuera de una capacidad, o con una técnica no
+        # bloqueable (&&, inyección de argumentos): resultado negativo
+        # normal, ni Finding ni informe aparte.
 
-    return findings, inconclusive, list(capabilities_by_key.values())
+    capabilities = list(capabilities_by_key.values())
+    for item in capabilities:
+        item["bypassable_filter"] = bool(item["confirmations"]) and bool(item["blocked_techniques"])
+
+    return findings, inconclusive, capabilities
 
 
 def validate_case(

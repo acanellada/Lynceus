@@ -34,6 +34,7 @@ from rich.text import Text
 from lynceus_sec.core.metrics import ClassMetrics
 from lynceus_sec.core.model import Finding, VulnClass
 from lynceus_sec.report import (
+    BYPASSABLE_FILTER_EXPLANATION,
     CAPABILITY_EXPLANATION,
     CLASS_LABELS,
     SEVERITY_LABELS,
@@ -43,6 +44,8 @@ from lynceus_sec.report import (
     count_phrase,
     format_calls,
     group_findings,
+    positive_control_summary_phrase,
+    summarize_positive_controls,
 )
 
 AMBER = "#b9770e"
@@ -328,41 +331,40 @@ def render_inconclusive(console: Console, inconclusive_by_class: dict[str, list[
 
 def render_positive_controls(console: Console, positive_controls_by_class: dict[str, list[dict]], *, plain: bool) -> None:
     """Control positivo informativo de path traversal: ¿puede la misma
-    tool/parámetro leer siquiera un fichero normal dentro del límite? No
-    cambia la clasificación de ninguna vulnerabilidad ni el resumen final."""
-    total = sum(len(items) for items in positive_controls_by_class.values())
+    tool/parámetro leer siquiera un fichero normal dentro del límite? Se
+    muestra solo un resumen (cuántos de cuántos lo confirman) y la lista de
+    los confirmados; no cambia la clasificación de ninguna vulnerabilidad ni
+    el resumen final. El detalle completo (también los no confirmados) solo
+    va al JSON."""
+    confirmed_count, total, confirmed_items = summarize_positive_controls(positive_controls_by_class)
     if total == 0:
         return
+    phrase = positive_control_summary_phrase(confirmed_count, total)
     if plain:
-        console.print(f"{count_phrase(total, 'control positivo', 'controles positivos')} (informativo):")
-        for class_name, items in positive_controls_by_class.items():
+        console.print(f"{phrase} (informativo):")
+        for class_name, item in confirmed_items:
             class_label = CLASS_LABELS.get(class_name, class_name)
-            for item in items:
-                console.print(
-                    f"  - clase={class_label} tool={sanitize_untrusted(item.get('tool'))} "
-                    f"parametro={sanitize_untrusted(item.get('parameter'))} "
-                    f"estado={sanitize_untrusted(item.get('status'))}"
-                )
+            console.print(
+                f"  - clase={class_label} tool={sanitize_untrusted(item.get('tool'))} "
+                f"parametro={sanitize_untrusted(item.get('parameter'))}"
+            )
         return
 
-    title = Text(
-        f"🧭 {count_phrase(total, 'control positivo', 'controles positivos')} (informativo)",
-        style=f"bold {GOLD}",
-    )
+    title = Text(f"🧭 {phrase} (informativo)", style=f"bold {GOLD}")
+    if not confirmed_items:
+        console.print(title)
+        return
     table = Table(title=title, border_style=GOLD, header_style=f"bold {GOLD}")
     table.add_column("Clase")
     table.add_column("Herramienta")
     table.add_column("Parámetro")
-    table.add_column("Estado")
-    for class_name, items in positive_controls_by_class.items():
+    for class_name, item in confirmed_items:
         class_label = CLASS_LABELS.get(class_name, class_name)
-        for item in items:
-            table.add_row(
-                Text(class_label),
-                Text(sanitize_untrusted(str(item.get("tool")))),
-                Text(sanitize_untrusted(str(item.get("parameter")))),
-                Text(sanitize_untrusted(str(item.get("status")))),
-            )
+        table.add_row(
+            Text(class_label),
+            Text(sanitize_untrusted(str(item.get("tool")))),
+            Text(sanitize_untrusted(str(item.get("parameter")))),
+        )
     console.print(table)
 
 
@@ -392,7 +394,16 @@ def _capability_detail_panel(index: int, class_name: str, item: dict) -> Panel:
         for line in format_calls(confirmation.get("reproduction")):
             body.append(f"    {sanitize_untrusted(line)}\n")
         body.append(f"    {sanitize_untrusted(confirmation.get('evidence'))}\n")
-    body.append(f"\n{CAPABILITY_EXPLANATION}", style="italic")
+
+    if item.get("bypassable_filter"):
+        eluding = ", ".join(
+            sanitize_untrusted(c.get("technique")) for c in item.get("confirmations", [])
+        )
+        blocking = ", ".join(sanitize_untrusted(t) for t in item.get("blocked_techniques", []))
+        body.append(f"\n⚠️  Filtro eludible: eluden [{eluding}]; bloquea [{blocking}]\n", style=f"bold {YELLOW}")
+        body.append(f"{BYPASSABLE_FILTER_EXPLANATION}", style="italic")
+    else:
+        body.append(f"\n{CAPABILITY_EXPLANATION}", style="italic")
 
     return Panel(Text.assemble(header, "\n\n", body), border_style=GOLD, padding=(1, 2))
 
@@ -423,6 +434,12 @@ def render_capabilities(console: Console, capabilities_by_class: dict[str, list[
                     console.print(f"      tecnica={sanitize_untrusted(confirmation.get('technique'))}")
                     for line in format_calls(confirmation.get("reproduction")):
                         console.print(f"        {sanitize_untrusted(line)}")
+                if item.get("bypassable_filter"):
+                    eluding = ",".join(
+                        sanitize_untrusted(c.get("technique")) for c in item.get("confirmations", [])
+                    )
+                    blocking = ",".join(sanitize_untrusted(t) for t in item.get("blocked_techniques", []))
+                    console.print(f"      filtro_eludible eluden={eluding} bloquea={blocking}")
         return
 
     title = Text(f"🧰 {count_phrase(total, 'capacidad detectada', 'capacidades detectadas')}", style=f"bold {GOLD}")
@@ -431,6 +448,7 @@ def render_capabilities(console: Console, capabilities_by_class: dict[str, list[
     table.add_column("Herramienta")
     table.add_column("Parámetro")
     table.add_column("Confirmaciones", justify="right")
+    table.add_column("Filtro")
 
     panels: list[Panel] = []
     index = 0
@@ -438,11 +456,13 @@ def render_capabilities(console: Console, capabilities_by_class: dict[str, list[
         class_label = CLASS_LABELS.get(class_name, class_name)
         for item in items:
             index += 1
+            filter_label = Text("eludible", style=f"bold {YELLOW}") if item.get("bypassable_filter") else Text("")
             table.add_row(
                 Text(class_label),
                 Text(sanitize_untrusted(item.get("tool"))),
                 Text(sanitize_untrusted(item.get("parameter"))),
                 Text(str(len(item.get("confirmations", [])))),
+                filter_label,
             )
             panels.append(_capability_detail_panel(index, class_name, item))
 
@@ -522,6 +542,95 @@ def render_metrics_table(
             Text(recall, style=style),
         )
     console.print(table)
+
+
+def render_clean_images(console: Console, images: list, *, plain: bool) -> None:
+    """Imágenes `lynceus-target:*` locales (`validator.clean.list_target_images`),
+    con su tamaño tal cual lo reporta `docker images`."""
+    if not images:
+        if plain:
+            console.print("[clean] ninguna imagen lynceus-target:* local.")
+        else:
+            console.print(Text("🧹 Ninguna imagen lynceus-target:* local.", style=GOLD))
+        return
+
+    phrase = count_phrase(len(images), "imagen lynceus-target local", "imágenes lynceus-target locales")
+    if plain:
+        console.print(f"{phrase}:")
+        for image in images:
+            console.print(f"  {sanitize_untrusted(image.tag)}  {sanitize_untrusted(image.size)}")
+        return
+
+    title = Text(f"🧹 {phrase}", style=f"bold {GOLD}")
+    table = Table(title=title, border_style=GOLD, header_style=f"bold {GOLD}")
+    table.add_column("Etiqueta")
+    table.add_column("Tamaño")
+    for image in images:
+        table.add_row(Text(sanitize_untrusted(image.tag)), Text(sanitize_untrusted(image.size)))
+    console.print(table)
+
+
+def render_clean_plan(
+    console: Console,
+    *,
+    to_remove: list[str],
+    kept: list[str],
+    cache_path,
+    plain: bool,
+) -> None:
+    """Qué se va a borrar y qué se va a conservar, mostrado antes de
+    ejecutar ningún borrado (`validator.clean.remove_images`/`remove_cache_dir`)."""
+    if plain:
+        for tag in to_remove:
+            console.print(f"[a-borrar] {sanitize_untrusted(tag)}")
+        for tag in kept:
+            console.print(f"[a-conservar] {sanitize_untrusted(tag)}")
+        if cache_path is not None:
+            console.print(f"[a-borrar] caché de build: {cache_path}")
+        return
+
+    for tag in to_remove:
+        console.print(Text(f"🗑️  A borrar: {sanitize_untrusted(tag)}", style=RED))
+    for tag in kept:
+        console.print(Text(f"🔒 A conservar: {sanitize_untrusted(tag)}", style=GOLD))
+    if cache_path is not None:
+        console.print(Text(f"🗑️  A borrar: caché de build en {cache_path}", style=RED))
+
+
+def render_clean_result(
+    console: Console,
+    *,
+    removed: list[str],
+    kept: list[str],
+    failed: list[str],
+    cache_path,
+    plain: bool,
+) -> None:
+    """Resultado de `lynceus clean --yes`: imágenes borradas/conservadas/que
+    fallaron, y si la caché de build se borró."""
+    if plain:
+        for tag in removed:
+            console.print(f"[borrada] {sanitize_untrusted(tag)}")
+        for tag in kept:
+            console.print(f"[conservada] {sanitize_untrusted(tag)}")
+        for tag in failed:
+            console.print(f"[error] no se pudo borrar {sanitize_untrusted(tag)}")
+        if cache_path is not None:
+            console.print(f"[cache] borrada: {cache_path}")
+        else:
+            console.print("[cache] no existía, nada que borrar")
+        return
+
+    for tag in removed:
+        console.print(Text(f"🗑️  Borrada: {sanitize_untrusted(tag)}", style=GREEN))
+    for tag in kept:
+        console.print(Text(f"🔒 Conservada: {sanitize_untrusted(tag)}", style=GOLD))
+    for tag in failed:
+        console.print(Text(f"⚠️  No se pudo borrar: {sanitize_untrusted(tag)}", style=RED))
+    if cache_path is not None:
+        console.print(Text(f"🧹 Caché de build borrada: {cache_path}", style=GOLD))
+    else:
+        console.print(Text("🧹 Caché de build: no existía, nada que borrar.", style=GOLD))
 
 
 def render_build_result(console: Console, result, *, plain: bool) -> None:
