@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import (
@@ -20,9 +20,14 @@ from lynceus_sec.validator.runner import (
     DEFAULT_ENTRY,
     DEFAULT_FS_ROOT,
     DEFAULT_IMAGE,
+    kill_container,
     run_harness,
     run_validate,
+    run_validate_split,
 )
+
+if TYPE_CHECKING:
+    from lynceus_sec.validator.parallel import ParallelContext
 
 _NEUTRAL_BY_TYPE: dict[str, Any] = {
     "string": "lynceus",
@@ -177,18 +182,47 @@ def validate_case(
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
     server_python: str | None = None,
+    jobs: int = 1,
+    ctx: ParallelContext | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Ver `cmdi.validate_case`: misma rama `jobs <= 1`/`ctx is None`
+    idéntica a siempre, misma rama paralela con el pool y el semáforo
+    compartidos de `ctx`."""
     case_id = Path(case_dir).name
-    tools = run_harness(
-        case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry,
-        pythonpath=pythonpath, server_python=server_python,
-    )
-    attempts = build_attempts(tools, fs_root)
-    if not attempts:
-        return [], [], []
 
-    results = run_validate(
-        case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root,
-        entry=entry, pythonpath=pythonpath, server_python=server_python,
-    )
-    return attempts_to_findings(case_id, attempts, results)
+    if jobs <= 1 or ctx is None:
+        tools = run_harness(
+            case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry,
+            pythonpath=pythonpath, server_python=server_python,
+        )
+        attempts = build_attempts(tools, fs_root)
+        if not attempts:
+            return [], [], []
+
+        results = run_validate(
+            case_dir, attempts, image=image, call_timeout=call_timeout, fs_root=fs_root,
+            entry=entry, pythonpath=pythonpath, server_python=server_python,
+        )
+        return attempts_to_findings(case_id, attempts, results)
+
+    with ctx.semaphore:
+        discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
+        ctx.active.add_container(discover_name)
+        try:
+            tools = ctx.pool.submit(
+                run_harness, case_dir, image=image, timeout=discover_timeout, fs_root=fs_root, entry=entry,
+                pythonpath=pythonpath, server_python=server_python, container_name=discover_name,
+            ).result()
+        finally:
+            kill_container(discover_name)
+            ctx.active.discard_container(discover_name)
+
+        attempts = build_attempts(tools, fs_root)
+        if not attempts:
+            return [], [], []
+
+        results = run_validate_split(
+            case_dir, attempts, jobs=jobs, ctx=ctx, image=image, call_timeout=call_timeout, fs_root=fs_root,
+            entry=entry, pythonpath=pythonpath, server_python=server_python,
+        )
+        return attempts_to_findings(case_id, attempts, results)

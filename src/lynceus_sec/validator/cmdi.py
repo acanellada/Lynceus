@@ -14,16 +14,21 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_payloads, build_probe_payload
 from lynceus_sec.validator.runner import (
     DEFAULT_ENTRY,
     DEFAULT_IMAGE,
+    kill_container,
     run_harness,
     run_validate,
+    run_validate_split,
 )
+
+if TYPE_CHECKING:
+    from lynceus_sec.validator.parallel import ParallelContext
 
 # Técnicas cuyo `not_confirmed` sí indica que una restricción las bloqueó
 # (dependen de un metacaracter de shell que un filtro podría interceptar).
@@ -232,18 +237,50 @@ def validate_case(
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
     server_python: str | None = None,
+    jobs: int = 1,
+    ctx: ParallelContext | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Con `jobs <= 1` (o sin `ctx`), exactamente el comportamiento de
+    siempre: un único contenedor de descubrimiento y uno de validación,
+    llamados directamente, sin pool. Con `jobs > 1`, descubrimiento y
+    validación pasan por el pool compartido de `ctx` (nunca uno aparte por
+    caso) y los intentos se reparten entre como mucho `jobs` contenedores de
+    validación (ver `run_validate_split`)."""
     case_id = Path(case_dir).name
-    tools = run_harness(
-        case_dir, image=image, timeout=discover_timeout, entry=entry,
-        pythonpath=pythonpath, server_python=server_python,
-    )
-    attempts = build_attempts(tools)
-    if not attempts:
-        return [], [], []
 
-    results = run_validate(
-        case_dir, attempts, image=image, call_timeout=call_timeout, entry=entry,
-        pythonpath=pythonpath, server_python=server_python,
-    )
-    return attempts_to_findings(case_id, attempts, results)
+    if jobs <= 1 or ctx is None:
+        tools = run_harness(
+            case_dir, image=image, timeout=discover_timeout, entry=entry,
+            pythonpath=pythonpath, server_python=server_python,
+        )
+        attempts = build_attempts(tools)
+        if not attempts:
+            return [], [], []
+
+        results = run_validate(
+            case_dir, attempts, image=image, call_timeout=call_timeout, entry=entry,
+            pythonpath=pythonpath, server_python=server_python,
+        )
+        return attempts_to_findings(case_id, attempts, results)
+
+    with ctx.semaphore:
+        discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
+        ctx.active.add_container(discover_name)
+        try:
+            tools = ctx.pool.submit(
+                run_harness, case_dir, image=image, timeout=discover_timeout, entry=entry,
+                pythonpath=pythonpath, server_python=server_python, container_name=discover_name,
+            ).result()
+        finally:
+            kill_container(discover_name)
+            ctx.active.discard_container(discover_name)
+
+        attempts = build_attempts(tools)
+        if not attempts:
+            return [], [], []
+
+        results = run_validate_split(
+            case_dir, attempts, jobs=jobs, ctx=ctx, image=image, call_timeout=call_timeout,
+            entry=entry, pythonpath=pythonpath, server_python=server_python,
+        )
+        return attempts_to_findings(case_id, attempts, results)

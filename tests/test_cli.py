@@ -948,3 +948,78 @@ def test_bench_renders_per_class_and_global_metrics_plain():
 def test_bench_unknown_class_exit_code_2():
     result = runner.invoke(app, ["bench", "--classes", "not_a_class", "--plain"])
     assert result.exit_code == 2
+
+
+# -- --jobs ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "17", "100"])
+def test_scan_jobs_outside_1_to_16_exit_code_2(case_dir, value):
+    result = runner.invoke(app, ["scan", str(case_dir), "--jobs", value, "--plain"])
+    assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("value", ["0", "17"])
+def test_bench_jobs_outside_1_to_16_exit_code_2(value):
+    result = runner.invoke(app, ["bench", "--jobs", value, "--plain"])
+    assert result.exit_code == 2
+
+
+def test_scan_jobs_1_is_accepted_and_behaves_like_no_jobs_flag(case_dir):
+    with _patched_validators():
+        result = runner.invoke(app, ["scan", str(case_dir), "--jobs", "1", "--plain"])
+    assert result.exit_code == 0
+
+
+def test_scan_jobs_above_one_still_produces_exit_code_0_without_findings(case_dir):
+    with _patched_validators():
+        result = runner.invoke(app, ["scan", str(case_dir), "--jobs", "2", "--plain"])
+    assert result.exit_code == 0
+
+
+def test_scan_warns_when_jobs_exceeds_docker_cpus(case_dir):
+    with patch("lynceus_sec.cli.parallel.docker_cpu_count", return_value=2), _patched_validators():
+        result = runner.invoke(app, ["scan", str(case_dir), "--jobs", "4", "--plain"])
+    assert result.exit_code == 0
+    assert "Aviso" in result.stdout and "--jobs 4" in result.stdout
+
+
+def test_scan_does_not_warn_when_jobs_fits_docker_cpus(case_dir):
+    with patch("lynceus_sec.cli.parallel.docker_cpu_count", return_value=8), _patched_validators():
+        result = runner.invoke(app, ["scan", str(case_dir), "--jobs", "4", "--plain"])
+    assert result.exit_code == 0
+    assert "Aviso" not in result.stdout
+
+
+def test_bench_warns_when_jobs_exceeds_docker_cpus():
+    def fake_run_class_benchmark(class_name, jobs, ctx):
+        return _empty_bench_result(class_name, CLASS_CONFIG[class_name]["vuln_class"])
+
+    with patch("lynceus_sec.cli.parallel.docker_cpu_count", return_value=2), \
+         patch("lynceus_sec.cli.run_class_benchmark", side_effect=fake_run_class_benchmark):
+        result = runner.invoke(app, ["bench", "--classes", "command_injection", "--jobs", "4", "--plain"])
+
+    assert result.exit_code == 0
+    assert "Aviso" in result.stdout and "--jobs 4" in result.stdout
+
+
+def test_bench_jobs_above_one_renders_the_same_metrics_as_jobs_1():
+    """La salida de progreso puede cambiar en paralelo (ver aviso de
+    "Ejecutando N clase(s) en paralelo"), pero la tabla de métricas final
+    (lo único que importa para determinismo) debe ser idéntica."""
+
+    def fake_run_class_benchmark(class_name, *args, **kwargs):
+        return _empty_bench_result(class_name, CLASS_CONFIG[class_name]["vuln_class"])
+
+    with patch("lynceus_sec.cli.run_class_benchmark", side_effect=fake_run_class_benchmark):
+        result_jobs_1 = runner.invoke(app, ["bench", "--plain"])
+    with patch("lynceus_sec.cli.run_class_benchmark", side_effect=fake_run_class_benchmark):
+        result_jobs_3 = runner.invoke(app, ["bench", "--jobs", "3", "--plain"])
+
+    assert result_jobs_1.exit_code == result_jobs_3.exit_code == 0
+
+    def _metrics_tail(stdout: str) -> list[str]:
+        lines = stdout.splitlines()
+        return [line for line in lines if "tp=" in line and "fp=" in line and "fn=" in line]
+
+    assert _metrics_tail(result_jobs_1.stdout) == _metrics_tail(result_jobs_3.stdout)

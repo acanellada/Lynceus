@@ -334,3 +334,59 @@ def test_validate_case_forwards_image_and_server_python_to_run_harness(monkeypat
 
     assert received["image"] == "lynceus-target:abc123def456"
     assert received["server_python"] == "/opt/target/bin/python"
+
+
+# --- validate_case: --jobs > 1 reparte los intentos entre varios contenedores ---
+
+
+def test_validate_case_jobs_1_calls_run_harness_and_run_validate_directly_without_a_pool(monkeypatch):
+    """Con jobs=1 (el valor por defecto), ni siquiera se requiere `ctx`: el
+    camino es exactamente el de siempre, sin tocar ningún pool."""
+    monkeypatch.setattr(cmdi, "run_harness", lambda case_dir, **kwargs: [TOOL])
+
+    received = {}
+
+    def fake_run_validate(case_dir, attempts, **kwargs):
+        received["attempts"] = attempts
+        received["kwargs"] = kwargs
+        return [{"id": a["id"], "status": "not_confirmed", "detail": None} for a in attempts]
+
+    monkeypatch.setattr(cmdi, "run_validate", fake_run_validate)
+
+    findings, inconclusive, _capabilities = cmdi.validate_case(Path("/some/case"), jobs=1, ctx=None)
+
+    assert findings == []
+    assert inconclusive == []
+    assert "container_name" not in received["kwargs"]  # nombre por defecto de run_validate, no uno nuestro
+
+
+def test_validate_case_splits_attempts_across_multiple_containers_when_jobs_above_one(monkeypatch):
+    from lynceus_sec.validator import runner
+    from lynceus_sec.validator.parallel import ParallelContext
+
+    monkeypatch.setattr(cmdi, "run_harness", lambda case_dir, **kwargs: [TOOL])
+    monkeypatch.setattr(cmdi, "kill_container", lambda name: None)
+    monkeypatch.setattr(runner, "kill_container", lambda name: None)
+
+    container_names = []
+    attempt_counts = []
+
+    def fake_run_validate(case_dir, attempts, **kwargs):
+        container_names.append(kwargs["container_name"])
+        attempt_counts.append(len(attempts))
+        return [{"id": a["id"], "status": "not_confirmed", "detail": None} for a in attempts]
+
+    monkeypatch.setattr(runner, "run_validate", fake_run_validate)
+
+    ctx = ParallelContext.create(3)
+    try:
+        findings, inconclusive, _capabilities = cmdi.validate_case(Path("/some/case"), jobs=3, ctx=ctx)
+    finally:
+        ctx.shutdown()
+
+    total_attempts = 2 * (len(build_payloads()) + 1)  # "ref" y "note", ver TOOL arriba
+    assert len(container_names) == 3
+    assert len(set(container_names)) == 3  # un contenedor distinto por trozo
+    assert sum(attempt_counts) == total_attempts
+    assert findings == []
+    assert inconclusive == []

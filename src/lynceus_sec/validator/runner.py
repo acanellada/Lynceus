@@ -8,7 +8,12 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from lynceus_sec.validator import parallel
+
+if TYPE_CHECKING:
+    from lynceus_sec.validator.parallel import ParallelContext
 
 HARNESS_PATH = Path(__file__).resolve().with_name("harness.py")
 RECEIVER_PATH = Path(__file__).resolve().with_name("receiver.py")
@@ -403,3 +408,64 @@ def run_validate(
     if "results" not in payload:
         raise RunnerError(f"JSON de validación sin clave 'results': {payload!r}")
     return payload["results"]
+
+
+def run_validate_split(
+    case_dir: Path,
+    attempts: list[dict[str, Any]],
+    *,
+    jobs: int,
+    ctx: ParallelContext | None,
+    image: str = DEFAULT_IMAGE,
+    call_timeout: float = 15.0,
+    total_timeout: float | None = None,
+    network: str = "none",
+    fs_root: str = DEFAULT_FS_ROOT,
+    entry: str = DEFAULT_ENTRY,
+    pythonpath: list[str] | None = None,
+    server_python: str | None = None,
+) -> list[dict[str, Any]]:
+    """Como `run_validate`, pero repartiendo `attempts` entre como mucho
+    `jobs` contenedores (nunca varios servidores a la vez dentro del mismo
+    contenedor: cada trozo arranca su propio contenedor, con las mismas
+    protecciones de siempre).
+
+    Con `jobs <= 1` o sin `ctx`, es exactamente `run_validate` (ni pool ni
+    reparto): así `--jobs 1` genera las mismas llamadas que hoy. Con
+    `jobs > 1`, cada trozo se manda al pool compartido de `ctx` (nunca uno
+    aparte) y el resultado final se concatena en el orden de los trozos,
+    nunca en el de llegada: el orden no depende de qué contenedor termine
+    antes. Ante cualquier fallo (incluida una interrupción), se mata cada
+    contenedor de trozo por nombre antes de propagar, igual que hoy mata su
+    único contenedor `run_validate`.
+    """
+    if jobs <= 1 or ctx is None:
+        return run_validate(
+            case_dir, attempts, image=image, call_timeout=call_timeout, total_timeout=total_timeout,
+            network=network, fs_root=fs_root, entry=entry, pythonpath=pythonpath, server_python=server_python,
+        )
+
+    chunks = parallel.partition(attempts, jobs)
+    names = [f"lynceus-sandbox-{uuid.uuid4().hex[:12]}" for _ in chunks]
+    for name in names:
+        ctx.active.add_container(name)
+
+    futures = [
+        ctx.pool.submit(
+            run_validate, case_dir, chunk, image=image, call_timeout=call_timeout, total_timeout=total_timeout,
+            network=network, fs_root=fs_root, entry=entry, pythonpath=pythonpath, server_python=server_python,
+            container_name=name,
+        )
+        for chunk, name in zip(chunks, names)
+    ]
+    try:
+        chunk_results = [future.result() for future in futures]
+    finally:
+        for name in names:
+            kill_container(name)
+            ctx.active.discard_container(name)
+
+    combined: list[dict[str, Any]] = []
+    for result in chunk_results:
+        combined.extend(result)
+    return combined

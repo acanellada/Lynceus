@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -46,11 +47,13 @@ from lynceus_sec.core.model import Finding, Label
 from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
 from lynceus_sec.validator import build as build_mod
 from lynceus_sec.validator import clean as clean_mod
+from lynceus_sec.validator import parallel
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
     validate_case_for,
 )
+from lynceus_sec.validator.parallel import ParallelContext
 from lynceus_sec.validator.runner import (
     DEFAULT_ENTRY,
     DEFAULT_FS_ROOT,
@@ -90,6 +93,49 @@ def _normalize_classes(classes: list[str], console) -> list[str]:
 
 def _network_for(class_name: str) -> str:
     return "internal" if class_name == "ssrf" else "none"
+
+
+def _validate_jobs_option(value: int, console) -> int:
+    try:
+        return parallel.validate_jobs(value)
+    except parallel.JobsError as exc:
+        console.print(f"Error: {exc}")
+        raise typer.Exit(2)
+
+
+def _warn_if_jobs_exceed_cpus(jobs: int, console) -> None:
+    """Con contención (más trabajadores que CPU que ve Docker), los tiempos
+    máximos por intento pueden hacer que un intento real parezca inconcluso;
+    esto es solo un aviso, `--jobs` sigue aplicándose tal cual."""
+    if jobs <= 1:
+        return
+    cpus = parallel.docker_cpu_count()
+    if cpus is not None and jobs > cpus:
+        console.print(
+            f"Aviso: --jobs {jobs} supera las {cpus} CPU que ve Docker; con contención, los "
+            "tiempos máximos por intento pueden dar inconclusos falsos."
+        )
+
+
+def _call_validate_case(
+    class_name: str,
+    validate_case,
+    target: Path,
+    *,
+    fs_root: str,
+    entry: str,
+    pythonpath: list[str],
+    image_kwargs: dict[str, str],
+    jobs: int = 1,
+    ctx: ParallelContext | None = None,
+):
+    """Mismos argumentos que hoy por clase (path_traversal necesita
+    `fs_root`, el resto no); con `jobs <= 1` no se añade `jobs`/`ctx` en
+    absoluto, así la llamada es idéntica a la de siempre."""
+    extra: dict = {"jobs": jobs, "ctx": ctx} if jobs > 1 and ctx is not None else {}
+    if class_name == "path_traversal":
+        return validate_case(target, fs_root=fs_root, entry=entry, pythonpath=pythonpath, **image_kwargs, **extra)
+    return validate_case(target, entry=entry, pythonpath=pythonpath, **image_kwargs, **extra)
 
 
 def _validate_fs_root(value: str, console) -> str:
@@ -310,6 +356,10 @@ def scan(
         help="Imagen 'lynceus-target:<12 hex>' (de 'lynceus build') en la que arrancar el servidor; "
         "por defecto se usa el sandbox y su propio intérprete.",
     ),
+    jobs: int = typer.Option(
+        1, "--jobs",
+        help=f"Contenedores a la vez, repartiendo intentos y clases distintas ({parallel.MIN_JOBS}-{parallel.MAX_JOBS}).",
+    ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
     """Valida dinámicamente una carpeta con server.py frente a las clases indicadas."""
@@ -320,6 +370,8 @@ def scan(
     normalized_classes = _normalize_classes(classes, console)
     fs_root = _validate_fs_root(fs_root, console)
     image = _validate_target_image(image, console)
+    jobs = _validate_jobs_option(jobs, console)
+    _warn_if_jobs_exceed_cpus(jobs, console)
 
     if not target.is_dir():
         console.print(f"Error: {target} no es una carpeta.")
@@ -345,30 +397,8 @@ def scan(
     capabilities_by_class: dict[str, list[dict]] = {}
     had_error = False
 
-    for class_name in normalized_classes:
-        vuln_class = CLASS_CONFIG[class_name]["vuln_class"]
-        validate_case = validate_case_for(vuln_class)
-        render_sandbox_status(console, class_name=class_name, network=_network_for(class_name), plain=plain_mode)
-        try:
-            if class_name == "path_traversal":
-                result = run_with_progress(
-                    console, class_name=class_name, plain=plain_mode,
-                    fn=lambda validate_case=validate_case: validate_case(
-                        target, fs_root=fs_root, entry=entry, pythonpath=pythonpath, **image_kwargs,
-                    ),
-                )
-            else:
-                result = run_with_progress(
-                    console, class_name=class_name, plain=plain_mode,
-                    fn=lambda validate_case=validate_case: validate_case(
-                        target, entry=entry, pythonpath=pythonpath, **image_kwargs,
-                    ),
-                )
-        except RunnerError as exc:
-            label = CLASS_LABELS.get(class_name, class_name)
-            console.print(f"Error ejecutando la validación de {label}: {exc}")
-            had_error = True
-            continue
+    def _absorb(class_name: str, result: tuple) -> None:
+        """Mismo reparto de hoy entre hallazgos/inconclusos/controles-o-capacidades."""
         findings, inconclusive, *rest = result
         all_findings.extend(findings)
         if inconclusive:
@@ -379,6 +409,67 @@ def scan(
             positive_controls_by_class[class_name] = rest[0]
         elif class_name == "command_injection" and rest and rest[0]:
             capabilities_by_class[class_name] = rest[0]
+
+    if jobs <= 1:
+        for class_name in normalized_classes:
+            vuln_class = CLASS_CONFIG[class_name]["vuln_class"]
+            validate_case = validate_case_for(vuln_class)
+            render_sandbox_status(console, class_name=class_name, network=_network_for(class_name), plain=plain_mode)
+            try:
+                result = run_with_progress(
+                    console, class_name=class_name, plain=plain_mode,
+                    fn=lambda validate_case=validate_case, class_name=class_name: _call_validate_case(
+                        class_name, validate_case, target, fs_root=fs_root, entry=entry,
+                        pythonpath=pythonpath, image_kwargs=image_kwargs,
+                    ),
+                )
+            except RunnerError as exc:
+                label = CLASS_LABELS.get(class_name, class_name)
+                console.print(f"Error ejecutando la validación de {label}: {exc}")
+                had_error = True
+                continue
+            _absorb(class_name, result)
+    else:
+        # Un único pool+semáforo compartido por las clases de este `scan`
+        # (nunca uno aparte por clase); cada clase corre en su propio hilo
+        # coordinador. Un RunnerError de una clase se registra y no afecta a
+        # las demás, igual que con --jobs 1; cualquier otra cosa (incluida
+        # una interrupción) mata todo lo que esté en marcha y se propaga.
+        ctx = ParallelContext.create(jobs)
+        console.print(f"Ejecutando {len(normalized_classes)} clase(s) en paralelo (jobs={jobs})...")
+        results_by_class: dict[str, tuple] = {}
+        errors_by_class: dict[str, str] = {}
+
+        def _run_one(class_name: str) -> None:
+            vuln_class = CLASS_CONFIG[class_name]["vuln_class"]
+            validate_case = validate_case_for(vuln_class)
+            try:
+                results_by_class[class_name] = _call_validate_case(
+                    class_name, validate_case, target, fs_root=fs_root, entry=entry,
+                    pythonpath=pythonpath, image_kwargs=image_kwargs, jobs=jobs, ctx=ctx,
+                )
+            except RunnerError as exc:
+                errors_by_class[class_name] = str(exc)
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(normalized_classes)) as drivers:
+                futures = [drivers.submit(_run_one, class_name) for class_name in normalized_classes]
+                try:
+                    for future in futures:
+                        future.result()
+                except BaseException:
+                    ctx.active.kill_and_clear()
+                    raise
+        finally:
+            ctx.shutdown()
+
+        for class_name in normalized_classes:
+            if class_name in errors_by_class:
+                label = CLASS_LABELS.get(class_name, class_name)
+                console.print(f"Error ejecutando la validación de {label}: {errors_by_class[class_name]}")
+                had_error = True
+                continue
+            _absorb(class_name, results_by_class[class_name])
 
     elapsed = time.monotonic() - start
 
@@ -520,6 +611,10 @@ def bench(
     classes: list[str] = typer.Option(  # noqa: B008 - patrón estándar de typer
         ALL_CLASSES, "--classes", help="Clases a incluir (repetible).", case_sensitive=False,
     ),
+    jobs: int = typer.Option(
+        1, "--jobs",
+        help=f"Contenedores a la vez, repartiendo intentos y clases distintas ({parallel.MIN_JOBS}-{parallel.MAX_JOBS}).",
+    ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
     """Ejecuta la validación dinámica sobre benchmark/cases y muestra las métricas por clase y global."""
@@ -528,20 +623,53 @@ def bench(
     render_header(console, version=_lynceus_version(), plain=plain_mode)
 
     normalized_classes = _normalize_classes(classes, console)
+    jobs = _validate_jobs_option(jobs, console)
+    _warn_if_jobs_exceed_cpus(jobs, console)
 
     combined_findings: list[Finding] = []
     combined_labels: dict[str, list[Label]] = {}
     rows = []
 
-    for class_name in normalized_classes:
-        render_sandbox_status(console, class_name=class_name, network=_network_for(class_name), plain=plain_mode)
-        result = run_with_progress(
-            console, class_name=class_name, plain=plain_mode,
-            fn=lambda class_name=class_name: run_class_benchmark(class_name),
-        )
-        combined_findings.extend(result.all_findings)
-        combined_labels.update(result.labels)
-        rows.append((CLASS_LABELS.get(class_name, class_name), result.metrics.by_class[result.vuln_class]))
+    if jobs <= 1:
+        for class_name in normalized_classes:
+            render_sandbox_status(console, class_name=class_name, network=_network_for(class_name), plain=plain_mode)
+            result = run_with_progress(
+                console, class_name=class_name, plain=plain_mode,
+                fn=lambda class_name=class_name: run_class_benchmark(class_name),
+            )
+            combined_findings.extend(result.all_findings)
+            combined_labels.update(result.labels)
+            rows.append((CLASS_LABELS.get(class_name, class_name), result.metrics.by_class[result.vuln_class]))
+    else:
+        # Un único pool+semáforo compartido por las clases de este `bench`
+        # (nunca uno aparte por clase); cada clase corre en su propio hilo
+        # coordinador. `run_class_benchmark` nunca deja escapar un
+        # RunnerError (lo registra por caso, igual que con --jobs 1); lo que
+        # sí escapa (p.ej. una interrupción) mata todo lo que esté en
+        # marcha y se propaga.
+        ctx = ParallelContext.create(jobs)
+        console.print(f"Ejecutando {len(normalized_classes)} clase(s) en paralelo (jobs={jobs})...")
+        results_by_class: dict[str, object] = {}
+        try:
+            with ThreadPoolExecutor(max_workers=len(normalized_classes)) as drivers:
+                futures = {
+                    class_name: drivers.submit(run_class_benchmark, class_name, jobs=jobs, ctx=ctx)
+                    for class_name in normalized_classes
+                }
+                try:
+                    for class_name in normalized_classes:
+                        results_by_class[class_name] = futures[class_name].result()
+                except BaseException:
+                    ctx.active.kill_and_clear()
+                    raise
+        finally:
+            ctx.shutdown()
+
+        for class_name in normalized_classes:
+            result = results_by_class[class_name]
+            combined_findings.extend(result.all_findings)
+            combined_labels.update(result.labels)
+            rows.append((CLASS_LABELS.get(class_name, class_name), result.metrics.by_class[result.vuln_class]))
 
     global_metrics = compute_metrics(combined_findings, combined_labels)
     rows.append(("Global", global_metrics))

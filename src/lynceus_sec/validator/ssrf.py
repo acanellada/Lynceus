@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from lynceus_sec.core.model import Finding, ReproductionCall, VulnClass
 from lynceus_sec.validator.payloads import build_ssrf_payloads
@@ -32,9 +32,13 @@ from lynceus_sec.validator.runner import (
     remove_network,
     run_harness,
     run_validate,
+    run_validate_split,
     start_receiver,
     stop_receiver,
 )
+
+if TYPE_CHECKING:
+    from lynceus_sec.validator.parallel import ParallelContext
 
 # Solo ModuleNotFoundError cuenta como fallo de entorno ajeno a esta clase;
 # errores de conexión o "url no permitida" son resultados negativos normales.
@@ -170,42 +174,92 @@ def validate_case(
     entry: str = DEFAULT_ENTRY,
     pythonpath: list[str] | None = None,
     server_python: str | None = None,
+    jobs: int = 1,
+    ctx: ParallelContext | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
+    """Con `jobs <= 1` (o sin `ctx`), exactamente el comportamiento de
+    siempre. Con `jobs > 1`: el semáforo de `ctx` se adquiere antes de crear
+    la red (y se libera al terminar, con éxito, error o interrupción), así
+    que nunca hay más de `jobs` redes ni `jobs` receptores de SSRF vivos a
+    la vez, con independencia de cuántos casos estén "arrancados". La red,
+    el receptor, la comprobación de aislamiento y el descubrimiento pasan
+    por el pool compartido de `ctx` (nunca uno aparte por caso); los
+    intentos se reparten entre como mucho `jobs` contenedores de validación
+    que comparten la misma red y el mismo receptor (ver `run_validate_split`
+    y el token único por intento en `payloads.build_ssrf_payloads`)."""
     case_id = Path(case_dir).name
-    network = create_internal_network()
-    receiver_name: str | None = None
-    discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
-    validate_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
-    try:
-        # El receptor y la comprobación de aislamiento viven en la imagen del
-        # sandbox siempre, nunca en la imagen objetivo pasada por `image`:
-        # confirman la red, no analizan al servidor.
-        check_network_isolation(network, image=DEFAULT_IMAGE)
-        receiver_name, receiver_ip = start_receiver(network, image=DEFAULT_IMAGE)
-        try:
-            tools = run_harness(
-                case_dir, image=image, timeout=discover_timeout,
-                network=network, container_name=discover_name, entry=entry,
-                pythonpath=pythonpath, server_python=server_python,
-            )
-            attempts = build_attempts(tools, receiver_name, receiver_ip)
-            if not attempts:
-                return [], []
 
-            results = run_validate(
-                case_dir, attempts, image=image, call_timeout=call_timeout,
-                network=network, container_name=validate_name, entry=entry,
-                pythonpath=pythonpath, server_python=server_python,
-            )
-            log_entries = read_receiver_log(receiver_name)
-            return attempts_to_findings(case_id, attempts, results, log_entries)
+    if jobs <= 1 or ctx is None:
+        network = create_internal_network()
+        receiver_name: str | None = None
+        discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
+        validate_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
+        try:
+            # El receptor y la comprobación de aislamiento viven en la imagen del
+            # sandbox siempre, nunca en la imagen objetivo pasada por `image`:
+            # confirman la red, no analizan al servidor.
+            check_network_isolation(network, image=DEFAULT_IMAGE)
+            receiver_name, receiver_ip = start_receiver(network, image=DEFAULT_IMAGE)
+            try:
+                tools = run_harness(
+                    case_dir, image=image, timeout=discover_timeout,
+                    network=network, container_name=discover_name, entry=entry,
+                    pythonpath=pythonpath, server_python=server_python,
+                )
+                attempts = build_attempts(tools, receiver_name, receiver_ip)
+                if not attempts:
+                    return [], []
+
+                results = run_validate(
+                    case_dir, attempts, image=image, call_timeout=call_timeout,
+                    network=network, container_name=validate_name, entry=entry,
+                    pythonpath=pythonpath, server_python=server_python,
+                )
+                log_entries = read_receiver_log(receiver_name)
+                return attempts_to_findings(case_id, attempts, results, log_entries)
+            finally:
+                # También ante KeyboardInterrupt: el contenedor del servidor
+                # (descubrimiento o validación) se mata por nombre antes de
+                # soltar el receptor y la red.
+                kill_container(discover_name)
+                kill_container(validate_name)
         finally:
-            # También ante KeyboardInterrupt: el contenedor del servidor
-            # (descubrimiento o validación) se mata por nombre antes de
-            # soltar el receptor y la red.
-            kill_container(discover_name)
-            kill_container(validate_name)
-    finally:
-        if receiver_name is not None:
-            stop_receiver(receiver_name)
-        remove_network(network)
+            if receiver_name is not None:
+                stop_receiver(receiver_name)
+            remove_network(network)
+
+    with ctx.semaphore:
+        network = ctx.pool.submit(create_internal_network).result()
+        ctx.active.add_network(network)
+        receiver_name = None
+        discover_name = f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
+        ctx.active.add_container(discover_name)
+        try:
+            ctx.pool.submit(check_network_isolation, network, image=DEFAULT_IMAGE).result()
+            receiver_name, receiver_ip = ctx.pool.submit(start_receiver, network, image=DEFAULT_IMAGE).result()
+            ctx.active.add_container(receiver_name)
+            try:
+                tools = ctx.pool.submit(
+                    run_harness, case_dir, image=image, timeout=discover_timeout,
+                    network=network, container_name=discover_name, entry=entry,
+                    pythonpath=pythonpath, server_python=server_python,
+                ).result()
+                attempts = build_attempts(tools, receiver_name, receiver_ip)
+                if not attempts:
+                    return [], []
+
+                results = run_validate_split(
+                    case_dir, attempts, jobs=jobs, ctx=ctx, image=image, call_timeout=call_timeout,
+                    network=network, entry=entry, pythonpath=pythonpath, server_python=server_python,
+                )
+                log_entries = read_receiver_log(receiver_name)
+                return attempts_to_findings(case_id, attempts, results, log_entries)
+            finally:
+                kill_container(discover_name)
+        finally:
+            ctx.active.discard_container(discover_name)
+            if receiver_name is not None:
+                ctx.active.discard_container(receiver_name)
+                stop_receiver(receiver_name)
+            remove_network(network)
+            ctx.active.discard_network(network)

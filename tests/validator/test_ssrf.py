@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -403,3 +404,87 @@ def test_receiver_and_isolation_always_use_the_sandbox_image_even_with_a_target_
     assert received_receiver_image == [ssrf.DEFAULT_IMAGE]
     assert received_run_harness_kwargs["image"] == "lynceus-target:abc123def456"
     assert received_run_harness_kwargs["server_python"] == "/opt/target/bin/python"
+
+
+# --- validate_case: --jobs > 1 comparte red/receptor y pasa todo por el pool ---
+
+
+def test_jobs_above_one_runs_isolation_check_and_discovery_on_a_pool_worker_thread(monkeypatch):
+    """La comprobación de aislamiento es un contenedor y debe pasar por el
+    mismo pool que descubrimiento y validación, nunca ejecutarse directamente
+    en el hilo coordinador del caso."""
+    from lynceus_sec.validator.parallel import ParallelContext
+
+    main_thread = threading.current_thread()
+    isolation_thread_names = []
+    receiver_thread_names = []
+
+    monkeypatch.setattr(ssrf, "create_internal_network", lambda: "lynceus-net-x")
+    monkeypatch.setattr(ssrf, "remove_network", lambda name: None)
+    monkeypatch.setattr(ssrf, "stop_receiver", lambda name: None)
+    monkeypatch.setattr(ssrf, "kill_container", lambda name: None)
+
+    def fake_check_network_isolation(network, *, image=None, **kwargs):
+        isolation_thread_names.append(threading.current_thread().name)
+
+    def fake_start_receiver(network, *, image=None, **kwargs):
+        receiver_thread_names.append(threading.current_thread().name)
+        return "lynceus-receiver-x", "10.0.0.5"
+
+    def fake_run_harness(case_dir, **kwargs):
+        return []  # sin tools: validate_case devuelve tras el descubrimiento
+
+    monkeypatch.setattr(ssrf, "check_network_isolation", fake_check_network_isolation)
+    monkeypatch.setattr(ssrf, "start_receiver", fake_start_receiver)
+    monkeypatch.setattr(ssrf, "run_harness", fake_run_harness)
+
+    ctx = ParallelContext.create(2)
+    try:
+        findings, inconclusive = ssrf.validate_case(Path("/some/case"), jobs=2, ctx=ctx)
+    finally:
+        ctx.shutdown()
+
+    assert findings == [] and inconclusive == []
+    assert isolation_thread_names != [main_thread.name]
+    assert receiver_thread_names != [main_thread.name]
+    assert isolation_thread_names == receiver_thread_names or isolation_thread_names != []
+
+
+def test_jobs_above_one_splits_attempts_across_containers_sharing_the_same_network_and_receiver(monkeypatch):
+    from lynceus_sec.validator import runner
+    from lynceus_sec.validator.parallel import ParallelContext
+
+    monkeypatch.setattr(ssrf, "create_internal_network", lambda: "lynceus-net-x")
+    monkeypatch.setattr(ssrf, "remove_network", lambda name: None)
+    monkeypatch.setattr(ssrf, "stop_receiver", lambda name: None)
+    monkeypatch.setattr(ssrf, "kill_container", lambda name: None)
+    monkeypatch.setattr(runner, "kill_container", lambda name: None)
+    monkeypatch.setattr(ssrf, "check_network_isolation", lambda network, **kwargs: None)
+    monkeypatch.setattr(ssrf, "start_receiver", lambda network, **kwargs: ("lynceus-receiver-x", "10.0.0.5"))
+    monkeypatch.setattr(ssrf, "run_harness", lambda case_dir, **kwargs: [TOOL_FETCH])
+    monkeypatch.setattr(ssrf, "read_receiver_log", lambda name: [])
+
+    networks_seen = set()
+    container_names = []
+    attempt_counts = []
+
+    def fake_run_validate(case_dir, attempts, **kwargs):
+        networks_seen.add(kwargs["network"])
+        container_names.append(kwargs["container_name"])
+        attempt_counts.append(len(attempts))
+        return [{"id": a["id"], "status": "not_confirmed", "detail": None} for a in attempts]
+
+    monkeypatch.setattr(runner, "run_validate", fake_run_validate)
+
+    ctx = ParallelContext.create(2)
+    try:
+        findings, inconclusive = ssrf.validate_case(Path("/some/case"), jobs=2, ctx=ctx)
+    finally:
+        ctx.shutdown()
+
+    # Un intento por (parámetro string, carga): "url" x ("host_url", "ip_url", "file_canary").
+    total_attempts = 3
+    assert networks_seen == {"lynceus-net-x"}  # misma red para todos los contenedores del caso
+    assert len(set(container_names)) == len(container_names)  # un contenedor distinto por trozo
+    assert sum(attempt_counts) == total_attempts
+    assert findings == [] and inconclusive == []
