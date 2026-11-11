@@ -92,6 +92,20 @@ Este fallo no tiene CVE asignado: se reportó y corrigió como el [issue #4838](
 
 Con este caso, Lynceus ha reproducido una vulnerabilidad real de cada una de sus tres clases (dos con CVE y una reportada públicamente sin CVE), y en dos de ellas ha distinguido la versión vulnerable de su corrección.
 
+### Medición sobre casos reales
+
+Los tres casos anteriores están descritos en `benchmark/real/`, con el commit exacto de cada versión y la URL de su aviso público. El resultado esperado se toma del aviso y del código, nunca de la salida de Lynceus. Se ejecutan con `lynceus bench --suite real`.
+
+| Caso | Versión | Esperado | Obtenido | Resultado |
+|---|---|---|---|---|
+| CVE-2026-7400 | Vulnerable | `read_file_tool`, `write_file_tool` | `read_file_tool` | Falso negativo en `write_file_tool` |
+| CVE-2026-7400 | Corregida | — | — | Correcto |
+| CVE-2026-7812 | Vulnerable | `git_operation` | `git_operation` | Correcto |
+| `mcp-server-fetch` (issue #4838) | Vulnerable | `fetch` | `fetch` | Correcto |
+| `mcp-server-fetch` (issue #4838) | Corregida | — | — | Correcto |
+
+Resultado global: precisión 1,00 y recall 0,75 (3 verdaderos positivos, 0 falsos positivos, 1 falso negativo). El falso negativo es real: el oráculo de path traversal detecta lecturas fuera del límite, pero no escrituras, y el CVE-2026-7400 permite ambas. Cinco versiones son una muestra pequeña.
+
 ## Inicio rápido
 
 Requisitos: Python 3.12, [uv](https://docs.astral.sh/uv/) y Docker.
@@ -181,7 +195,7 @@ El modelo de amenazas completo está en [`docs/threat-model.md`](docs/threat-mod
 
 ## Hoja de ruta
 
-- Un lote de servidores reales con versión vulnerable y corregida, para medir la precisión con casos reales y no solo la detección.
+- Ampliar la suite real con más casos que tengan versión vulnerable y corregida, y añadir un oráculo de escritura para path traversal.
 - Un lote de casos nuevo, no usado durante el desarrollo, para una medida independiente.
 - Salida SARIF y GitHub Action.
 - Distribución como skill para agentes de código, cuando haya una versión estable.

@@ -177,6 +177,16 @@ Problemas de Lynceus que destapó este caso, ya corregidos: un pyproject.toml co
 
 Limitaciones: en SSRF no hay control positivo. Sin salida a Internet, no se puede comprobar que la versión corregida siga descargando URL públicas: el resultado negativo es el esperado, pero no se verifica que la herramienta funcione.
 
+## Primera medición sobre casos reales (11/11/2026)
+
+Suite: benchmark/real/, un manifiesto por caso con repositorio, commit exacto (SHA completo), aviso público y resultado esperado. Lynceus clona cada repositorio en su caché sin ejecutar hooks ni submódulos, verifica el SHA, construye el entorno de cada versión con sus dependencias resueltas a la fecha del commit y valida solo la clase del caso.
+
+Resultado: 5 versiones (3 vulnerables y 2 corregidas), TP=3, FP=0, FN=1: precisión 1,00 y recall 0,75. Las dos corregidas son verdaderos negativos. El falso negativo es write_file_tool en CVE-2026-7400: el aviso lo nombra junto a read_file_tool, y el oráculo de path traversal solo detecta lecturas.
+
+Lecciones de método: la primera versión de los manifiestos tomaba el resultado esperado de la propia salida de Lynceus, lo que habría dado un 100 % circular; ahora sale del aviso y del código. Revisar los avisos destapó además que uno de los casos estaba mal atribuido a un CVE (ver la corrección en la sección del tercer servidor real). Un error de ejecución no cuenta como falso negativo: las versiones con error se excluyen de las métricas y hacen fallar la ejecución.
+
+Limitaciones: muestra pequeña; un caso sin versión corregida; sin control positivo en SSRF.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner
