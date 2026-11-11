@@ -79,7 +79,9 @@ Este caso destapó un falso positivo en la versión anterior de Lynceus (el cana
 | `run_command` | Capacidad por diseño: ejecuta comandos a propósito, así que no se reporta como inyección |
 | Las otras siete | Sin hallazgos |
 
-### Tercer servidor real: CVE-2025-65513
+### Tercer servidor real: SSRF en `mcp-server-fetch` (issue #4838, sin CVE)
+
+Este fallo no tiene CVE asignado: se reportó y corrigió como el [issue #4838](https://github.com/modelcontextprotocol/servers/issues/4838). Una versión anterior de este documento le atribuía por error el CVE-2025-65513, que corresponde a otro proyecto (`zcaceres/fetch-mcp`); ver la nota de corrección en `docs/landscape.md`.
 
 `mcp-server-fetch`, el servidor de referencia oficial para descargar páginas web, no comprobaba a qué dirección se conectaba. La versión de octubre de 2026 rechaza por defecto las IP privadas, de loopback y de metadatos. Cada versión se analiza con su propio entorno: la vulnerable con el SDK de MCP 1.6.0 y la corregida con el 2.3.0.
 
@@ -88,7 +90,7 @@ Este caso destapó un falso positivo en la versión anterior de Lynceus (el cana
 | Marzo de 2025 (vulnerable) | SSRF confirmada: el receptor recibió la petición por nombre y por IP |
 | 2026.10.10 (corregida) | Sin hallazgos |
 
-Con este caso, Lynceus ha reproducido un CVE real de cada una de sus tres clases, y en dos de ellos ha distinguido la versión vulnerable de su corrección.
+Con este caso, Lynceus ha reproducido una vulnerabilidad real de cada una de sus tres clases (dos con CVE y una reportada públicamente sin CVE), y en dos de ellas ha distinguido la versión vulnerable de su corrección.
 
 ## Inicio rápido
 

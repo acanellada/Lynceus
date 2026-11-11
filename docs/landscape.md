@@ -163,7 +163,9 @@ Observación: run_command intenta limitarse a un comando simple con una lista ne
 
 Limitaciones: sin versión corregida, este caso mide la detección pero no la capacidad de distinguir una corrección.
 
-## Tercer servidor real: CVE-2025-65513 (04/11/2026)
+## Tercer servidor real: SSRF en mcp-server-fetch, issue #4838 (04/11/2026)
+
+**Corrección (11/11/2026):** una versión anterior de esta sección atribuía este fallo al CVE-2025-65513. Es incorrecto: según NVD, ese CVE corresponde a otro proyecto, zcaceres/fetch-mcp (Node, versiones hasta la 1.0.2). La atribución errónea procedía de un artículo secundario que no se contrastó con NVD. El fallo de modelcontextprotocol/servers no tiene CVE: se reportó y corrigió como el issue #4838 (commit 315ad50). El análisis y sus resultados no cambian; solo el identificador. Desde esta corrección, los manifiestos de la suite real exigen la URL del aviso de cada caso, y los resultados esperados se toman de ese aviso y del código, nunca de la salida de Lynceus.
 
 Objetivo: modelcontextprotocol/servers, src/fetch. Vulnerable: commit 9a4d513 (30/03/2025), sin ninguna comprobación de la dirección de destino. Corregida: 2026.10.10 (commit 3423e57), que rechaza por defecto direcciones privadas, de loopback y de metadatos (commit 315ad50). Las dependencias se declaran en pyproject.toml.
 
