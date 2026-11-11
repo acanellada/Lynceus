@@ -1023,3 +1023,116 @@ def test_bench_jobs_above_one_renders_the_same_metrics_as_jobs_1():
         return [line for line in lines if "tp=" in line and "fp=" in line and "fn=" in line]
 
     assert _metrics_tail(result_jobs_1.stdout) == _metrics_tail(result_jobs_3.stdout)
+
+
+# -- bench --suite -------------------------------------------------------
+
+
+def test_bench_invalid_suite_exit_code_2():
+    result = runner.invoke(app, ["bench", "--suite", "nope", "--plain"])
+    assert result.exit_code == 2
+
+
+def test_bench_default_suite_is_current_and_never_touches_the_real_suite():
+    """La suite 'current' (por defecto) no debe cargar manifiestos reales ni
+    invocar la orquestación de `real_bench`: ver CLAUDE.md, la suite actual
+    no cambia."""
+
+    def fake_run_class_benchmark(class_name):
+        return _empty_bench_result(class_name, CLASS_CONFIG[class_name]["vuln_class"])
+
+    with patch("lynceus_sec.cli.run_class_benchmark", side_effect=fake_run_class_benchmark), \
+         patch("lynceus_sec.cli.load_real_manifests") as fake_load, \
+         patch("lynceus_sec.cli.real_bench.run_real_benchmark") as fake_run_real:
+        result = runner.invoke(app, ["bench", "--plain"])
+
+    assert result.exit_code == 0
+    fake_load.assert_not_called()
+    fake_run_real.assert_not_called()
+
+
+def test_bench_current_suite_renders_inconclusive_by_class_and_case():
+    def fake_run_class_benchmark(class_name):
+        result = _empty_bench_result(class_name, CLASS_CONFIG[class_name]["vuln_class"])
+        if class_name == "command_injection":
+            result.inconclusive_by_case = {"cmdi-01": [{"tool": "t", "parameter": "p", "status": "inconclusive"}]}
+        return result
+
+    with patch("lynceus_sec.cli.run_class_benchmark", side_effect=fake_run_class_benchmark):
+        result = runner.invoke(app, ["bench", "--classes", "command_injection", "--plain"])
+
+    assert result.exit_code == 0
+    assert "intento inconcluso" in result.stdout
+    assert "cmdi-01" in result.stdout
+    assert "inconclusos=1" in result.stdout
+
+
+def test_bench_suite_real_invalid_manifest_exit_code_2(tmp_path):
+    with patch("lynceus_sec.cli.load_real_manifests", side_effect=ValueError("manifiesto roto")):
+        result = runner.invoke(app, ["bench", "--suite", "real", "--plain"])
+    assert result.exit_code == 2
+    assert "manifiesto roto" in result.stdout
+
+
+def test_bench_suite_real_renders_version_table_with_image_tag_and_metrics():
+    from lynceus_sec.validator import real_bench as real_bench_mod
+    from lynceus_sec.validator.real_manifest import RealManifest
+
+    manifest = RealManifest.model_validate(
+        {
+            "id": "cve-test", "cve": "CVE-TEST", "advisory": "https://example.com/advisory",
+            "class": "path_traversal",
+            "repo": "https://example.com/repo.git", "requirements": "requirements.txt", "entry": "server.py",
+            "versions": [
+                {"label": "vulnerable", "commit": "a" * 40,
+                 "expected": [{"tool": "read_file_tool", "parameter": "path"}]},
+            ],
+        }
+    )
+    version_result = real_bench_mod.RealVersionResult(
+        manifest_id="cve-test", cve="CVE-TEST", vuln_class=VulnClass.PATH_TRAVERSAL, label="vulnerable",
+        expected=[("read_file_tool", "path")], found=[("read_file_tool", "path")],
+        image_tag="lynceus-target:abc123def456", tp=1, fp=0, fn=0,
+    )
+    fake_result = real_bench_mod._assemble_real_result([version_result])
+
+    with patch("lynceus_sec.cli.load_real_manifests", return_value=[manifest]), \
+         patch("lynceus_sec.cli.real_bench.run_real_benchmark", return_value=fake_result):
+        result = runner.invoke(app, ["bench", "--suite", "real", "--classes", "path_traversal", "--plain"])
+
+    assert result.exit_code == 0
+    assert "CVE-TEST" in result.stdout
+    assert "lynceus-target:abc123def456" in result.stdout
+    assert "read_file_tool/path" in result.stdout
+    assert "Path traversal: tp=1 fp=0 fn=0" in result.stdout
+
+
+def test_bench_suite_real_errored_version_excluded_from_metrics_and_exits_nonzero():
+    from lynceus_sec.validator import real_bench as real_bench_mod
+    from lynceus_sec.validator.real_manifest import RealManifest
+
+    manifest = RealManifest.model_validate(
+        {
+            "id": "cve-test", "cve": "CVE-TEST", "advisory": "https://example.com/advisory",
+            "class": "ssrf",
+            "repo": "https://example.com/repo.git", "requirements": "requirements.txt", "entry": "server.py",
+            "versions": [
+                {"label": "vulnerable", "commit": "a" * 40, "expected": [{"tool": "fetch", "parameter": "url"}]},
+            ],
+        }
+    )
+    errored_result = real_bench_mod.RealVersionResult(
+        manifest_id="cve-test", cve="CVE-TEST", vuln_class=VulnClass.SSRF, label="vulnerable",
+        expected=[("fetch", "url")], found=[], error="docker boom", tp=0, fp=0, fn=0,
+    )
+    fake_result = real_bench_mod._assemble_real_result([errored_result])
+
+    with patch("lynceus_sec.cli.load_real_manifests", return_value=[manifest]), \
+         patch("lynceus_sec.cli.real_bench.run_real_benchmark", return_value=fake_result):
+        result = runner.invoke(app, ["bench", "--suite", "real", "--classes", "ssrf", "--plain"])
+
+    assert result.exit_code != 0
+    assert "SSRF: tp=0 fp=0 fn=0" in result.stdout
+    assert "Global: tp=0 fp=0 fn=0" in result.stdout
+    assert "versión con error" in result.stdout
+    assert "docker boom" in result.stdout

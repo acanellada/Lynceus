@@ -544,6 +544,145 @@ def render_metrics_table(
     console.print(table)
 
 
+def _real_result_label(result) -> str:
+    if result.error:
+        return "ERROR"
+    if result.fp and result.fn:
+        return "FP+FN"
+    if result.fp:
+        return "FP"
+    if result.fn:
+        return "FN"
+    return "OK"
+
+
+def render_real_versions_table(console: Console, results: list, *, plain: bool) -> None:
+    """Una fila por versión de cada manifiesto real (`validator.real_bench`):
+    CVE, versión, imagen `lynceus-target` usada, hallazgos esperados y
+    obtenidos (por `(tool, parameter)`) y el veredicto. `tool`/`parameter`
+    vienen de `list_tools` del servidor analizado: no confiables, se sanean."""
+    if not results:
+        return
+
+    def _pairs(pairs: list[tuple[str, str]]) -> str:
+        """Deduplica antes de mostrar: una vulnerabilidad real con varias
+        técnicas confirmadas aporta el mismo `(tool, parameter)` una vez por
+        técnica, pero aquí solo importa qué combinaciones se encontraron."""
+        if not pairs:
+            return "—" if not plain else "-"
+        deduped = dict.fromkeys(pairs)
+        return ", ".join(f"{sanitize_untrusted(tool)}/{sanitize_untrusted(parameter)}" for tool, parameter in deduped)
+
+    if plain:
+        console.print("[real] resultados por versión:")
+        for result in results:
+            console.print(
+                f"  cve={sanitize_untrusted(result.cve) or '-'} version={sanitize_untrusted(result.label)} "
+                f"imagen={result.image_tag or '-'} esperado={_pairs(result.expected)} "
+                f"obtenido={_pairs(result.found)} resultado={_real_result_label(result)}"
+                + (f" error={sanitize_untrusted(result.error)}" if result.error else "")
+            )
+        return
+
+    title = Text("🧬 Servidores reales por versión", style=f"bold {AMBER_BRIGHT}")
+    table = Table(title=title, border_style=AMBER, header_style=f"bold {GOLD}")
+    table.add_column("CVE")
+    table.add_column("Versión")
+    table.add_column("Imagen")
+    table.add_column("Esperado")
+    table.add_column("Obtenido")
+    table.add_column("Resultado")
+    for result in results:
+        label = _real_result_label(result)
+        style = GREEN if label == "OK" else RED
+        table.add_row(
+            Text(sanitize_untrusted(result.cve) or "—"),
+            Text(sanitize_untrusted(result.label)),
+            Text(result.image_tag or "—"),
+            Text(_pairs(result.expected)),
+            Text(_pairs(result.found)),
+            Text(label, style=f"bold {style}"),
+        )
+    console.print(table)
+
+
+def render_errored_versions(console: Console, errored: list, *, plain: bool) -> None:
+    """Versiones reales (`lynceus bench --suite real`) que no llegaron a
+    construirse o escanearse: un error de entorno (clonado, build o scan),
+    nunca un hallazgo. Se excluyen de TP/FP/FN —no se puede saber qué habría
+    encontrado Lynceus— y se listan aparte para que no se confundan con un
+    resultado limpio (`ver cli._run_real_bench`, que además sale con código
+    de error si esta lista no está vacía)."""
+    if not errored:
+        return
+
+    phrase = count_phrase(
+        len(errored), "versión con error, excluida de las métricas", "versiones con error, excluidas de las métricas",
+    )
+    if plain:
+        console.print(f"{phrase}:")
+        for result in errored:
+            console.print(
+                f"  cve={sanitize_untrusted(result.cve) or '-'} version={sanitize_untrusted(result.label)} "
+                f"error={sanitize_untrusted(result.error)}"
+            )
+        return
+
+    title = Text(f"🛑 {phrase}", style=f"bold {RED}")
+    table = Table(title=title, border_style=RED, header_style=f"bold {GOLD}")
+    table.add_column("CVE")
+    table.add_column("Versión")
+    table.add_column("Error", overflow="fold")
+    for result in errored:
+        table.add_row(
+            Text(sanitize_untrusted(result.cve) or "—"),
+            Text(sanitize_untrusted(result.label)),
+            Text(sanitize_untrusted(result.error)),
+        )
+    console.print(table)
+
+
+def render_inconclusive_counts(
+    console: Console,
+    *,
+    by_class: dict[str, int],
+    by_case: dict[str, int],
+    plain: bool,
+) -> None:
+    """Número de intentos inconclusos por clase y por caso, para `lynceus
+    bench` en cualquiera de las dos suites (`--suite current`/`--suite real`).
+    Distinto de `render_inconclusive` (que es de `scan` y muestra el detalle
+    técnica a técnica): aquí solo el recuento."""
+    total = sum(by_class.values())
+    if total == 0:
+        return
+
+    if plain:
+        console.print(f"{count_phrase(total, 'intento inconcluso', 'intentos inconclusos')}:")
+        for class_name, count in by_class.items():
+            console.print(f"  clase={CLASS_LABELS.get(class_name, class_name)} inconclusos={count}")
+        for case_id, count in by_case.items():
+            console.print(f"  caso={sanitize_untrusted(case_id)} inconclusos={count}")
+        return
+
+    title = Text(f"⚠️  {count_phrase(total, 'intento inconcluso', 'intentos inconclusos')}", style=f"bold {YELLOW}")
+    console.print(title)
+
+    by_class_table = Table(title=Text("Por clase", style=f"bold {GOLD}"), border_style=YELLOW, header_style=f"bold {GOLD}")
+    by_class_table.add_column("Clase")
+    by_class_table.add_column("Inconclusos", justify="right")
+    for class_name, count in by_class.items():
+        by_class_table.add_row(Text(CLASS_LABELS.get(class_name, class_name)), Text(str(count)))
+    console.print(by_class_table)
+
+    by_case_table = Table(title=Text("Por caso", style=f"bold {GOLD}"), border_style=YELLOW, header_style=f"bold {GOLD}")
+    by_case_table.add_column("Caso")
+    by_case_table.add_column("Inconclusos", justify="right")
+    for case_id, count in by_case.items():
+        by_case_table.add_row(Text(sanitize_untrusted(case_id)), Text(str(count)))
+    console.print(by_case_table)
+
+
 def render_clean_images(console: Console, images: list, *, plain: bool) -> None:
     """Imágenes `lynceus-target:*` locales (`validator.clean.list_target_images`),
     con su tamaño tal cual lo reporta `docker images`."""

@@ -1,0 +1,43 @@
+# modelcontextprotocol/servers, src/fetch (mcp-server-fetch) — SSRF, issue #4838
+#
+# Sin CVE asignado: se reportó y se corrigió como issue de GitHub, no como
+# aviso formal (NVD/GHSA). "CVE-2025-65513" es un identificador real, pero de
+# un servidor MCP distinto y sin relación (zcaceres/fetch-mcp, TypeScript);
+# no se usa aquí para no atribuir un CVE equivocado a este código.
+#
+# El commit vulnerable (9a4d513, 30/03/2025) llama a `AsyncClient.get()` con
+# `follow_redirects=True` en `fetch_url` (mcp_server_fetch/server.py) sin
+# ninguna comprobación de la dirección de destino, ni en la petición inicial
+# ni en los saltos de redirección: un modelo controla la tool `fetch`, de
+# parámetro `url` (clase `Fetch`, campo `url: AnyUrl`). El commit 315ad50
+# ("fix(fetch): refuse private, loopback and metadata addresses by default
+# (#4838)") añade un hook de petición de httpx que resuelve el host de cada
+# petición y la rechaza si no es una dirección globalmente enrutable;
+# `--allow-private-ips` lo desactiva para desarrollo local. El commit
+# corregido de este manifiesto (3423e57, versión 2026.10.10) es posterior a
+# 315ad50, así que ya incluye la corrección.
+#
+# `expected` sale del issue y del código, no de ejecutar Lynceus: el issue
+# solo nombra la tool `fetch` (parámetro `url`); no hay otra tool expuesta
+# por este servidor.
+
+id = "mcp-server-fetch-ssrf-4838"
+advisory = "https://github.com/modelcontextprotocol/servers/issues/4838"
+class = "ssrf"
+repo = "https://github.com/modelcontextprotocol/servers"
+subdir = "src/fetch"
+requirements = "pyproject.toml"
+entry = "src/mcp_server_fetch/__main__.py"
+pythonpath = ["src"]
+
+[[versions]]
+label = "vulnerable"
+commit = "9a4d513724b4fbe638ca24f6f86e6fc3ca373e89"
+resolve_date = "2025-03-30"
+expected = [{ tool = "fetch", parameter = "url" }]
+
+[[versions]]
+label = "fixed"
+commit = "3423e578031c554e9aefa4d648e0d05d6f0be917"
+resolve_date = "2026-10-10"
+expected = []

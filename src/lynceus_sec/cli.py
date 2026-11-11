@@ -30,12 +30,15 @@ from lynceus_sec.cli_render import (
     render_clean_images,
     render_clean_plan,
     render_clean_result,
+    render_errored_versions,
     render_findings_table,
     render_fs_root,
     render_header,
     render_inconclusive,
+    render_inconclusive_counts,
     render_metrics_table,
     render_positive_controls,
+    render_real_versions_table,
     render_report_paths,
     render_sandbox_status,
     render_summary,
@@ -47,13 +50,14 @@ from lynceus_sec.core.model import Finding, Label
 from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
 from lynceus_sec.validator import build as build_mod
 from lynceus_sec.validator import clean as clean_mod
-from lynceus_sec.validator import parallel
+from lynceus_sec.validator import parallel, real_bench
 from lynceus_sec.validator.bench import (
     CLASS_CONFIG,
     run_class_benchmark,
     validate_case_for,
 )
 from lynceus_sec.validator.parallel import ParallelContext
+from lynceus_sec.validator.real_manifest import load_real_manifests
 from lynceus_sec.validator.runner import (
     DEFAULT_ENTRY,
     DEFAULT_FS_ROOT,
@@ -224,6 +228,54 @@ def _validate_target_image(value: str | None, console) -> str | None:
         console.print(f"Error: la imagen {value!r} no existe en local; constrúyela con 'lynceus build'.")
         raise typer.Exit(2)
     return value
+
+
+def _validate_suite_option(value: str, console) -> str:
+    normalized = value.lower()
+    if normalized not in ("current", "real"):
+        console.print(f"Error: --suite {value!r} debe ser 'current' o 'real'.")
+        raise typer.Exit(2)
+    return normalized
+
+
+def _run_real_bench(console, normalized_classes: list[str], *, jobs: int, plain_mode: bool) -> None:
+    """Suite `real` de `lynceus bench`: construye y valida cada versión de
+    cada manifiesto de `benchmark/real/` (ver `validator.real_bench`), filtrada
+    por `--classes` igual que la suite `current`. Mismo formato de métricas
+    (por clase y global), más la tabla por versión y los inconclusos por
+    clase/caso."""
+    try:
+        manifests = load_real_manifests()
+    except ValueError as exc:
+        console.print(f"Error cargando los manifiestos de benchmark/real: {exc}")
+        raise typer.Exit(2)
+
+    selected = [manifest for manifest in manifests if manifest.vuln_class.value in normalized_classes]
+
+    console.print(f"Ejecutando la suite real ({len(selected)} manifiesto(s) de servidor)...")
+    result = run_with_progress(
+        console, class_name="real", plain=plain_mode,
+        fn=lambda: real_bench.run_real_benchmark(selected, jobs=jobs),
+    )
+
+    render_real_versions_table(console, result.version_results, plain=plain_mode)
+
+    rows = [
+        (
+            CLASS_LABELS.get(class_name, class_name),
+            result.metrics.by_class[CLASS_CONFIG[class_name]["vuln_class"]],
+        )
+        for class_name in normalized_classes
+    ]
+    rows.append(("Global", result.metrics))
+    render_metrics_table(console, rows, plain=plain_mode)
+    render_inconclusive_counts(
+        console, by_class=result.inconclusive_by_class, by_case=result.inconclusive_by_case, plain=plain_mode,
+    )
+    render_errored_versions(console, result.errored, plain=plain_mode)
+
+    if result.errored:
+        raise typer.Exit(2)
 
 
 def _validate_resolve_date(value: str | None, console) -> str | None:
@@ -611,24 +663,36 @@ def bench(
     classes: list[str] = typer.Option(  # noqa: B008 - patrón estándar de typer
         ALL_CLASSES, "--classes", help="Clases a incluir (repetible).", case_sensitive=False,
     ),
+    suite: str = typer.Option(
+        "current", "--suite",
+        help="Suite a validar: 'current' (benchmark/cases, por defecto, no cambia) o "
+        "'real' (benchmark/real, servidores reales con CVE conocido).",
+    ),
     jobs: int = typer.Option(
         1, "--jobs",
         help=f"Contenedores a la vez, repartiendo intentos y clases distintas ({parallel.MIN_JOBS}-{parallel.MAX_JOBS}).",
     ),
     plain: bool = typer.Option(False, "--plain", help="Salida de texto plano, sin colores ni emojis."),
 ) -> None:
-    """Ejecuta la validación dinámica sobre benchmark/cases y muestra las métricas por clase y global."""
+    """Ejecuta la validación dinámica sobre la suite indicada y muestra las métricas por clase y global."""
     plain_mode = is_plain_mode(plain_flag=plain)
     console = make_console(plain=plain_mode)
     render_header(console, version=_lynceus_version(), plain=plain_mode)
 
     normalized_classes = _normalize_classes(classes, console)
+    suite = _validate_suite_option(suite, console)
     jobs = _validate_jobs_option(jobs, console)
     _warn_if_jobs_exceed_cpus(jobs, console)
+
+    if suite == "real":
+        _run_real_bench(console, normalized_classes, jobs=jobs, plain_mode=plain_mode)
+        return
 
     combined_findings: list[Finding] = []
     combined_labels: dict[str, list[Label]] = {}
     rows = []
+    inconclusive_by_class: dict[str, int] = {}
+    inconclusive_by_case: dict[str, int] = {}
 
     if jobs <= 1:
         for class_name in normalized_classes:
@@ -640,6 +704,10 @@ def bench(
             combined_findings.extend(result.all_findings)
             combined_labels.update(result.labels)
             rows.append((CLASS_LABELS.get(class_name, class_name), result.metrics.by_class[result.vuln_class]))
+            if result.inconclusive_by_case:
+                inconclusive_by_class[class_name] = sum(len(v) for v in result.inconclusive_by_case.values())
+                for case_id, items in result.inconclusive_by_case.items():
+                    inconclusive_by_case[case_id] = len(items)
     else:
         # Un único pool+semáforo compartido por las clases de este `bench`
         # (nunca uno aparte por clase); cada clase corre en su propio hilo
@@ -670,10 +738,17 @@ def bench(
             combined_findings.extend(result.all_findings)
             combined_labels.update(result.labels)
             rows.append((CLASS_LABELS.get(class_name, class_name), result.metrics.by_class[result.vuln_class]))
+            if result.inconclusive_by_case:
+                inconclusive_by_class[class_name] = sum(len(v) for v in result.inconclusive_by_case.values())
+                for case_id, items in result.inconclusive_by_case.items():
+                    inconclusive_by_case[case_id] = len(items)
 
     global_metrics = compute_metrics(combined_findings, combined_labels)
     rows.append(("Global", global_metrics))
     render_metrics_table(console, rows, plain=plain_mode)
+    render_inconclusive_counts(
+        console, by_class=inconclusive_by_class, by_case=inconclusive_by_case, plain=plain_mode,
+    )
 
 
 def main() -> None:
