@@ -40,6 +40,17 @@ _NEUTRAL_BY_TYPE: dict[str, Any] = {
     "object": {},
 }
 
+# Nombres de parámetro de texto que indican formato/modo, no contenido ni
+# ruta: un servidor real espera ahí un valor de un conjunto cerrado (una
+# codificación, un modo de apertura, un mimetype...), nunca texto libre ni
+# una ruta de fichero. Probar el token ahí nunca puede confirmar una
+# escritura (el servidor rechazaría un valor inventado como contenido), y
+# probarlo como ruta objetivo tampoco tiene sentido real. Comparación en
+# minúsculas, por coincidencia exacta del nombre.
+_FORMAT_PARAM_NAMES = frozenset(
+    {"encoding", "mode", "format", "charset", "mimetype", "content_type", "type"}
+)
+
 # Valor neutro para un parámetro de texto que, en un intento de escritura,
 # no es ni la ruta ni el candidato a contenido elegido para llevar el token
 # (p.ej. `encoding` cuando el candidato a contenido es `content`). "lynceus"
@@ -169,22 +180,32 @@ def build_write_attempts(tools: list[dict[str, Any]], fs_root: str = DEFAULT_FS_
     planta nada en la ruta objetivo: solo se confirma si el propio servidor
     la crea.
 
-    Con S parámetros de texto por tool, hay S*(S-1) combinaciones
-    (path_param, content_param); con las 6 técnicas de cada una, son
-    S*(S-1)*6 intentos `write` más S*(S-1) controles. Con S=2 (el caso
-    común, p.ej. `write_file_tool(path, content)`) son 12+2=14, igual que
-    antes de este cambio: solo hay un candidato a contenido posible, así
-    que no hay nada que probar por turnos. Con S=3 (p.ej. `path`,
-    `content`, `encoding`) son 36+6=42. Si un parámetro de texto es el
-    único de la tool (S=1), no se genera ningún intento de escritura para
-    él: sin otro parámetro de texto no hay dónde poner el token, y sin
-    token `_confirm_write` nunca podría confirmar nada.
+    Un parámetro cuyo nombre está en `_FORMAT_PARAM_NAMES` (`encoding`,
+    `mode`, `format`...) nunca es `path_param` ni `content_param`: no es una
+    ruta de fichero ni un portador de contenido libre, así que probarlo en
+    cualquiera de los dos papeles solo generaría intentos inútiles. Sigue
+    recibiendo `_NEUTRAL_WRITE_TEXT_DEFAULT` como relleno en los intentos de
+    las demás combinaciones (ver `_write_arguments`).
+
+    Con S' parámetros de texto por tool tras excluir los de formato, hay
+    S'*(S'-1) combinaciones (path_param, content_param); con las 6 técnicas
+    de cada una, son S'*(S'-1)*6 intentos `write` más S'*(S'-1) controles.
+    Con S'=2 (el caso común, p.ej. `write_file_tool(path, content)`) son
+    12+2=14. Con `write_file_tool(path, content, encoding)`, `encoding`
+    queda excluido y S'=2 igual que el caso anterior: 14 intentos, no los
+    36+6=42 de contar `encoding` como un candidato más (ver
+    `test_build_write_attempts_format_param_does_not_change_the_attempt_count_versus_the_tool_without_it`).
+    Si tras la exclusión un parámetro de texto es el único candidato a ruta
+    de la tool (S'=1), no se genera ningún intento de escritura para él: sin
+    otro parámetro de texto no hay dónde poner el token, y sin token
+    `_confirm_write` nunca podría confirmar nada.
     """
     attempts: list[dict[str, Any]] = []
     for tool in tools:
         string_params = _string_params(tool)
-        for path_param in string_params:
-            content_candidates = [p for p in string_params if p != path_param]
+        path_candidates = [p for p in string_params if p.lower() not in _FORMAT_PARAM_NAMES]
+        for path_param in path_candidates:
+            content_candidates = [p for p in path_candidates if p != path_param]
             for content_param in content_candidates:
                 for payload in build_path_traversal_write_payloads(fs_root):
                     arguments = _write_arguments(

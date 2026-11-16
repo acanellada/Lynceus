@@ -191,28 +191,53 @@ THREE_TEXT_PARAM_TOOL = {
 }
 
 
-def test_build_write_attempts_generates_one_variant_per_other_text_param_as_content_candidate():
+def test_build_write_attempts_excludes_the_format_param_from_both_roles():
     attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
     write_payload_count = len(build_path_traversal_write_payloads())
 
-    # S=3 parámetros de texto: S*(S-1)=6 combinaciones (path_param,
-    # content_param); con 6 técnicas cada una, 36 intentos "write" más 6
-    # controles positivos.
+    # "encoding" es un parámetro de formato: queda excluido como path_param
+    # y como content_param. Solo quedan 2 combinaciones válidas (path,
+    # content) y (content, path): 12 intentos "write" más 2 controles.
     by_kind: dict[str, int] = {}
     for attempt in attempts:
         by_kind[attempt["kind"]] = by_kind.get(attempt["kind"], 0) + 1
     assert by_kind == {
-        "write": 3 * 2 * write_payload_count,
-        "write_positive_control": 3 * 2,
+        "write": 2 * write_payload_count,
+        "write_positive_control": 2,
     }
 
+    assert {a["parameter"] for a in attempts} == {"path", "content"}
+    assert {a["content_parameter"] for a in attempts} == {"path", "content"}
 
-def test_build_write_attempts_tries_each_other_text_param_as_content_in_turn():
+
+def test_build_write_attempts_format_param_does_not_change_the_attempt_count_versus_the_tool_without_it():
+    """write_file_tool(path, content, encoding) genera exactamente los
+    mismos intentos de escritura que write_file_tool(path, content): el
+    parámetro de formato no añade combinaciones nuevas en ningún papel."""
+    two_param_tool = {
+        "name": "write_file_tool",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+    }
+
+    attempts_with_encoding = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+    attempts_without_encoding = build_write_attempts([two_param_tool])
+
+    assert len(attempts_with_encoding) == len(attempts_without_encoding) == 14
+
+
+def test_build_write_attempts_tries_each_non_format_text_param_as_content_in_turn():
     attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
 
-    for path_param in ("path", "content", "encoding"):
+    for path_param in ("path", "content"):
         content_candidates = {a["content_parameter"] for a in attempts if a["parameter"] == path_param}
-        expected = {"path", "content", "encoding"} - {path_param}
+        expected = {"path", "content"} - {path_param}
         assert content_candidates == expected
 
 
@@ -254,6 +279,25 @@ def test_build_write_attempts_skips_a_text_param_with_no_other_text_param_to_car
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
+        },
+    }
+
+    assert build_write_attempts([tool]) == []
+
+
+def test_build_write_attempts_skips_a_tool_whose_only_other_text_param_is_a_format_param():
+    """`path` + `encoding`: tras excluir `encoding` como candidato a
+    contenido, no queda ningún otro parámetro de texto que lo porte —
+    mismo caso que S=1, no se genera ningún intento."""
+    tool = {
+        "name": "write_file_tool",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "encoding": {"type": "string"},
+            },
+            "required": ["path", "encoding"],
         },
     }
 
