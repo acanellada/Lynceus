@@ -156,6 +156,117 @@ def build_positive_control_payload(fs_root: str = DEFAULT_FS_ROOT) -> PositiveCo
     return PositiveControlPayload(canary_path=path, canary_content=content, value=path)
 
 
+def _random_write_token() -> str:
+    return f"lynceus-write-{uuid.uuid4().hex}"
+
+
+@dataclass(frozen=True)
+class WritePayload:
+    """A diferencia de `PathPayload` (lectura), el harness nunca planta nada
+    en `target_path`: debe no existir antes de la llamada, y solo se
+    confirma si el propio servidor la crea con `token` dentro."""
+
+    technique: str
+    target_path: str
+    token: str
+    value: str
+    symlink_path: str | None = None
+    symlink_target: str | None = None
+
+
+def _new_write_target(directory: str) -> str:
+    return f"{directory}/lynceus-write-{uuid.uuid4().hex}"
+
+
+def build_path_traversal_write_payloads(
+    fs_root: str = DEFAULT_FS_ROOT, depth: int = _TRAVERSAL_DEPTH
+) -> list[WritePayload]:
+    """Cargas de escritura fuera del límite, conscientes de `fs_root`, en las
+    mismas tres formas que `build_path_traversal_payloads` (lectura):
+
+    - una carpeta aparte (`OUTSIDE_DIR`), con ruta absoluta y "../" repetido
+      (variantes "bare" y con prefijo "./");
+    - una carpeta hermana del límite con el mismo prefijo, con las mismas
+      dos cargas "bare";
+    - un enlace simbólico dentro del límite que apunta directamente (no a
+      una carpeta, como en lectura) a una ruta aún inexistente bajo la
+      carpeta aparte: un enlace "colgante". Si tras la llamada esa ruta
+      existe con el token, solo pudo haberla creado el servidor siguiendo
+      el enlace.
+
+    A diferencia de la lectura (donde varias técnicas pueden compartir un
+    mismo canario ya plantado, porque solo son formas distintas de llegar a
+    un fichero que ya existe), aquí cada técnica lleva su propia ruta
+    objetivo y su propio token: la llamada puede crear esa ruta, y si dos
+    técnicas compartieran una, la primera en confirmar dejaría la ruta
+    creada y la comprobación de "no debe existir todavía" de la segunda la
+    marcaría como inconclusa aunque el servidor sea vulnerable por esa vía
+    también.
+    """
+    traversal_prefix = "../" * depth
+    payloads: list[WritePayload] = []
+
+    outside_target = _new_write_target(OUTSIDE_DIR)
+    payloads.append(WritePayload("absolute_outside_write", outside_target, _random_write_token(), outside_target))
+
+    dotdot_outside_target = _new_write_target(OUTSIDE_DIR)
+    dotdot_outside_relative = f"{traversal_prefix}{dotdot_outside_target.removeprefix('/')}"
+    payloads.append(
+        WritePayload("dotdot_outside_write", dotdot_outside_target, _random_write_token(), dotdot_outside_relative)
+    )
+
+    dotslash_outside_target = _new_write_target(OUTSIDE_DIR)
+    dotslash_outside_relative = f"{traversal_prefix}{dotslash_outside_target.removeprefix('/')}"
+    payloads.append(
+        WritePayload(
+            "dotslash_outside_write", dotslash_outside_target, _random_write_token(),
+            f"./{dotslash_outside_relative}",
+        )
+    )
+
+    sibling_dir = _sibling_dir(fs_root)
+
+    sibling_target = _new_write_target(sibling_dir)
+    payloads.append(WritePayload("absolute_sibling_write", sibling_target, _random_write_token(), sibling_target))
+
+    dotdot_sibling_target = _new_write_target(sibling_dir)
+    dotdot_sibling_relative = f"{traversal_prefix}{dotdot_sibling_target.removeprefix('/')}"
+    payloads.append(
+        WritePayload(
+            "dotdot_sibling_write", dotdot_sibling_target, _random_write_token(), dotdot_sibling_relative,
+        )
+    )
+
+    link_path = f"{fs_root.rstrip('/')}/lynceus-link-{uuid.uuid4().hex}"
+    link_target = _new_write_target(OUTSIDE_DIR)
+    payloads.append(
+        WritePayload(
+            "symlink_write", link_target, _random_write_token(), link_path,
+            symlink_path=link_path, symlink_target=link_target,
+        )
+    )
+
+    return payloads
+
+
+@dataclass(frozen=True)
+class WritePositiveControlPayload:
+    target_path: str
+    token: str
+    value: str
+
+
+def build_positive_control_write_payload(fs_root: str = DEFAULT_FS_ROOT) -> WritePositiveControlPayload:
+    """Una ruta nueva (que no debe existir) dentro del límite, con un token
+    propio: control positivo informativo que comprueba si la misma
+    tool/parámetro puede siquiera escribir dentro de su propio límite. No es
+    una carga de ataque y nunca produce un Finding.
+    """
+    path = f"{fs_root.rstrip('/')}/lynceus-write-positive-{uuid.uuid4().hex}"
+    token = _random_write_token()
+    return WritePositiveControlPayload(target_path=path, token=token, value=path)
+
+
 @dataclass(frozen=True)
 class SsrfPayload:
     technique: str

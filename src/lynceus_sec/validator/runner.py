@@ -117,6 +117,7 @@ def build_docker_command(
     pythonpath: list[str] | None = None,
     server_python: str | None = None,
     extra_harness_args: list[str] | None = None,
+    stdin: bool = False,
 ) -> tuple[str, list[str]]:
     """Construye el comando `docker run` del sandbox. No ejecuta nada.
 
@@ -129,8 +130,13 @@ def build_docker_command(
     distintas rutas separadas por `:`. `server_python`, si se da, es la ruta
     (fija, ver `TARGET_PYTHON`) con la que el harness arranca el servidor
     analizado en vez de con su propio intérprete; el harness mismo sigue
-    ejecutándose con el Python por defecto de `image`. El resto de flags de
-    endurecimiento no cambia nunca.
+    ejecutándose con el Python por defecto de `image`. `stdin`, si es
+    `True`, añade `-i` para que `docker run` mantenga abierto y conecte el
+    stdin del contenedor (del propio harness, nunca del servidor analizado:
+    ese se arranca aparte, con su propia tubería; ver `_run_validate` en
+    `harness.py`); lo usa `run_validate` para pasarle el JSON de los
+    intentos sin ponerlo en `argv`, que tiene un límite del sistema. El
+    resto de flags de endurecimiento no cambia nunca.
     """
     name = container_name or f"lynceus-sandbox-{uuid.uuid4().hex[:12]}"
     flags = _security_flags(memory, cpus, pids_limit, home=fs_root)
@@ -139,6 +145,10 @@ def build_docker_command(
         flags += ["-e", f"PYTHONPATH={joined}"]
     cmd = [
         "docker", "run", "--rm",
+    ]
+    if stdin:
+        cmd.append("-i")
+    cmd += [
         "--name", name,
         "--network", network,
         *flags,
@@ -318,10 +328,19 @@ def _check_docker_and_image(image: str) -> None:
         )
 
 
-def _execute(case_dir: Path, cmd: list[str], container_name: str, wall_clock_timeout: float) -> dict[str, Any]:
-    """Ejecuta el comando docker, mata el contenedor si expira y devuelve el JSON del harness."""
+def _execute(
+    case_dir: Path, cmd: list[str], container_name: str, wall_clock_timeout: float,
+    *, input_text: str | None = None,
+) -> dict[str, Any]:
+    """Ejecuta el comando docker, mata el contenedor si expira y devuelve el
+    JSON del harness. `input_text`, si se da, se escribe en el stdin del
+    proceso `docker run` y se cierra (igual que hace `subprocess.run` con
+    `input=`); solo `run_validate` lo usa, junto con `stdin=True` en
+    `build_docker_command`."""
     try:
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=wall_clock_timeout)
+        proc = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=wall_clock_timeout, input=input_text,
+        )
     except subprocess.TimeoutExpired as exc:
         kill_container(container_name)
         raise RunnerError(f"El harness no terminó en {wall_clock_timeout}s para {case_dir}") from exc
@@ -384,6 +403,12 @@ def run_validate(
     y `container_name` solo los fija el llamador (SSRF) para poder matar el
     contenedor por nombre si hace falta abortar; el resto de clases usan los
     valores por defecto.
+
+    El JSON de `attempts` se le pasa al harness por stdin (`--attempts-stdin`),
+    no como argumento de `docker run`: con muchos intentos (varias clases con
+    muchos parámetros de texto), meterlo en `argv` puede superar el límite del
+    sistema ("argument list too long"). `build_docker_command` recibe
+    `stdin=True` para que `docker run` mantenga abierto y conecte ese stdin.
     """
     _check_docker_and_image(image)
 
@@ -393,15 +418,15 @@ def run_validate(
 
     extra_args = [
         "--mode", "validate",
-        "--attempts", json.dumps(attempts),
+        "--attempts-stdin",
         "--total-timeout", str(total_timeout),
     ]
     container_name, cmd = build_docker_command(
         case_dir, image=image, timeout=call_timeout, network=network, fs_root=fs_root,
         entry=entry, pythonpath=pythonpath, server_python=server_python,
-        container_name=container_name, extra_harness_args=extra_args,
+        container_name=container_name, extra_harness_args=extra_args, stdin=True,
     )
-    payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=wall_clock_timeout)
+    payload = _execute(case_dir, cmd, container_name, wall_clock_timeout=wall_clock_timeout, input_text=json.dumps(attempts))
 
     if "error" in payload:
         raise RunnerError(f"El harness reportó un error en la validación: {payload['error']}")

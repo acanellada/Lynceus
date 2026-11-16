@@ -5,21 +5,40 @@ donde no está instalado el paquete `lynceus_sec`.
 
 Dos modos:
 - `list` (por defecto): initialize + list_tools, sin llamar a ninguna tool.
-- `validate`: recibe una lista de intentos (`--attempts`, JSON) y para cada uno
-  arranca un servidor nuevo y llama a la tool indicada. Nunca confía en lo que
-  el servidor reporte: el oráculo lo decide el propio harness.
+- `validate`: recibe una lista de intentos y para cada uno arranca un
+  servidor nuevo y llama a la tool indicada. Nunca confía en lo que el
+  servidor reporte: el oráculo lo decide el propio harness. El JSON de los
+  intentos llega por `--attempts-stdin` (lee de stdin) o, si no se da esa
+  bandera, por `--attempts <json>` en argv (solo para invocar el harness a
+  mano; `runner.py` siempre usa `--attempts-stdin`, porque con muchos
+  intentos el JSON en argv puede superar el límite del sistema). Leer de
+  stdin es seguro aquí: el cliente MCP (`stdio_client`) arranca el servidor
+  analizado con su propia tubería de stdin, nunca heredando la del harness,
+  así que no hay conflicto entre leer los intentos y hablar el protocolo
+  con el servidor.
   - Si el intento no lleva `canary_content` (inyección de comandos/argumentos):
     se comprueba si el fichero `canary_path` existe tras la llamada.
-  - Si lleva `canary_content` (path traversal): antes de arrancar el servidor
-    se escribe `canary_content` en `canary_path` (creando el directorio padre
-    si falta), y se confirma solo si ese contenido aparece en el texto de la
-    respuesta (éxito o error). Si además lleva `symlink_path`/`symlink_target`,
-    se crea ese enlace simbólico antes de la llamada. Antes de arrancar
-    cualquier servidor también se crea `$HOME` si no existe. Toda ruta que se
-    vaya a crear (directorio, canario o enlace, y el destino del enlace) se
-    normaliza y se comprueba que cae bajo /tmp; si no, se rechaza sin crear
-    nada: defensa en profundidad, ya que el host nunca debería construir un
-    intento con una ruta fuera de /tmp, pero el harness no confía en ello.
+  - Si lleva `canary_content` (path traversal, lectura): antes de arrancar
+    el servidor se escribe `canary_content` en `canary_path` (creando el
+    directorio padre si falta), y se confirma solo si ese contenido aparece
+    en el texto de la respuesta (éxito o error). Si además lleva
+    `symlink_path`/`symlink_target`, se crea ese enlace simbólico antes de
+    la llamada. Antes de arrancar cualquier servidor también se crea `$HOME`
+    si no existe. Toda ruta que se vaya a crear (directorio, canario o
+    enlace, y el destino del enlace) se normaliza y se comprueba que cae
+    bajo /tmp; si no, se rechaza sin crear nada: defensa en profundidad, ya
+    que el host nunca debería construir un intento con una ruta fuera de
+    /tmp, pero el harness no confía en ello.
+  - Si lleva `write_target_path` (path traversal, escritura): a diferencia
+    de la lectura, el harness nunca planta nada ahí. Justo antes de llamar
+    al servidor comprueba que esa ruta no existe; si ya existe, el intento
+    es `inconclusive` sin llegar a llamar a nada. Si lleva
+    `symlink_path`/`symlink_target` (la técnica del enlace), el enlace se
+    crea apuntando directamente a `write_target_path`, que todavía no
+    existe: un enlace "colgante". Tras la llamada, se confirma solo si esa
+    ruta existe y su contenido contiene `write_token` como subcadena (no
+    por igualdad exacta, para no perder una escritura real que el servidor
+    envuelva o transforme).
   - Si lleva `calls` (SSRF, intentos en dos pasos): en vez de una única
     llamada a `tool`/`arguments`, ejecuta la lista de llamadas en orden
     dentro de la misma sesión del mismo servidor, y agrega el resultado
@@ -135,6 +154,34 @@ def _classify_attempt(
     return {"id": attempt_id, "status": "not_confirmed", "detail": None}
 
 
+def _prepare_symlink(attempt: dict[str, Any]) -> None:
+    """Crea el enlace simbólico del intento (`symlink_path` -> `symlink_target`)
+    si lleva esas claves y aún no existe. No requiere que el destino exista:
+    para el oráculo de escritura, el destino es justo la ruta objetivo,
+    todavía inexistente (enlace "colgante"), y solo la llamada al servidor
+    debería poder crearla ahí."""
+    symlink_path = attempt.get("symlink_path")
+    symlink_target = attempt.get("symlink_target")
+    if symlink_path is None or symlink_target is None:
+        return
+    link_path = _ensure_under_tmp(symlink_path, what="symlink_path")
+    link_target = _ensure_under_tmp(symlink_target, what="symlink_target")
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    if not link_path.is_symlink():
+        link_path.symlink_to(link_target)
+
+
+def _confirm_write(target_path: Path, token: str) -> bool:
+    """`token` como subcadena del contenido de `target_path`, no por
+    igualdad exacta: el servidor puede envolver o transformar lo que recibe
+    (añadir salto de línea, metadatos, etc.) sin que eso deje de confirmar
+    la escritura. `False` si la ruta no existe o no se puede leer."""
+    try:
+        return token in target_path.read_text()
+    except OSError:
+        return False
+
+
 def _resolve_interpreter(path: str | None) -> str:
     """Sin `path`: el propio intérprete del harness. Con `path` (la ruta fija
     de la imagen objetivo, ver `TARGET_PYTHON` en runner.py): se comprueba que
@@ -170,14 +217,7 @@ async def _call_once(server_path: str, attempt: dict[str, Any], interpreter: str
         canary_path.parent.mkdir(parents=True, exist_ok=True)
         canary_path.write_text(canary_content)
 
-    symlink_path = attempt.get("symlink_path")
-    symlink_target = attempt.get("symlink_target")
-    if symlink_path is not None and symlink_target is not None:
-        link_path = _ensure_under_tmp(symlink_path, what="symlink_path")
-        link_target = _ensure_under_tmp(symlink_target, what="symlink_target")
-        link_path.parent.mkdir(parents=True, exist_ok=True)
-        if not link_path.is_symlink():
-            link_path.symlink_to(link_target)
+    _prepare_symlink(attempt)
 
     params = StdioServerParameters(command=interpreter, args=[server_path], env=_server_env())
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
@@ -198,9 +238,47 @@ async def _call_once(server_path: str, attempt: dict[str, Any], interpreter: str
         return is_error, " ".join(texts)
 
 
+async def _run_one_write_attempt(
+    server_path: str, attempt: dict[str, Any], timeout: float, interpreter: str
+) -> dict[str, Any]:
+    """Oráculo de escritura (`write_target_path`/`write_token`): a diferencia
+    de `_run_one_attempt`, el harness nunca planta nada en la ruta objetivo.
+    Comprueba que no existe justo antes de llamar al servidor (si existe, es
+    `inconclusive` sin llamar a nada); tras la llamada, confirma solo si esa
+    ruta existe y contiene el token (ver `_confirm_write`)."""
+    target_path = _ensure_under_tmp(attempt["write_target_path"], what="write_target_path")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists():
+        return {
+            "id": attempt["id"],
+            "status": "inconclusive",
+            "detail": "la ruta objetivo ya existía antes de la llamada",
+        }
+
+    protocol_error: str | None = None
+    tool_error: str | None = None
+    try:
+        is_error, text = await asyncio.wait_for(_call_once(server_path, attempt, interpreter), timeout=timeout)
+        if is_error:
+            tool_error = text or "la tool devolvió un error sin texto"
+    except Exception as exc:  # noqa: BLE001 - cualquier fallo se clasifica, nunca se propaga
+        protocol_error = _describe(exc)
+
+    write_confirmed = _confirm_write(target_path, attempt["write_token"])
+    error_kind = "protocol" if protocol_error else ("tool" if tool_error else None)
+    environment_markers = attempt.get("environment_markers", _ENV_ERROR_MARKERS)
+    return _classify_attempt(
+        attempt["id"], write_confirmed, error_kind, protocol_error or tool_error,
+        environment_markers=environment_markers,
+    )
+
+
 async def _run_one_attempt(
     server_path: str, attempt: dict[str, Any], timeout: float, interpreter: str
 ) -> dict[str, Any]:
+    if attempt.get("write_target_path") is not None:
+        return await _run_one_write_attempt(server_path, attempt, timeout, interpreter)
+
     protocol_error: str | None = None
     tool_error: str | None = None
     response_text = ""
@@ -232,6 +310,18 @@ async def _run_one_attempt(
     )
 
 
+def _load_attempts(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """Dos fuentes posibles para el JSON de intentos: stdin (`--attempts-stdin`,
+    lo que usa siempre `runner.py`, para no superar el límite de `argv` con
+    muchos intentos) o `--attempts <json>` en argv (solo para invocar el
+    harness a mano). Si no se da ninguna, `ValueError`."""
+    if args.attempts_stdin:
+        return json.loads(sys.stdin.read())
+    if args.attempts is not None:
+        return json.loads(args.attempts)
+    raise ValueError("modo validate sin --attempts ni --attempts-stdin")
+
+
 async def _validate(
     server_path: str,
     attempts: list[dict[str, Any]],
@@ -257,6 +347,10 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--mode", choices=["list", "validate"], default="list")
     parser.add_argument("--attempts", default=None)
+    parser.add_argument(
+        "--attempts-stdin", action="store_true",
+        help="Lee el JSON de --attempts de stdin en vez de argv (evita 'argument list too long' con muchos intentos).",
+    )
     parser.add_argument("--total-timeout", type=float, default=60.0)
     parser.add_argument("--server-python", default=None)
     args = parser.parse_args()
@@ -274,7 +368,11 @@ def main() -> int:
         return 1
 
     if args.mode == "validate":
-        attempts = json.loads(args.attempts)
+        try:
+            attempts = _load_attempts(args)
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 1
         payload = asyncio.run(_validate(args.server_path, attempts, args.timeout, args.total_timeout, interpreter))
         print(json.dumps(payload))
         return 0

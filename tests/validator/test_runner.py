@@ -170,6 +170,99 @@ def test_run_validate_forwards_server_python_to_docker_command(monkeypatch):
     assert captured["server_python"] == runner.TARGET_PYTHON
 
 
+# --- Los intentos se pasan por stdin, no por argv (evita "argument list
+# too long" de docker run con muchos intentos; ver harness._load_attempts) ---
+
+
+def test_stdin_true_adds_dash_i_flag():
+    _, cmd = build_docker_command(CASE_DIR, stdin=True)
+
+    assert "-i" in cmd
+
+
+def test_stdin_false_by_default_means_no_dash_i_flag():
+    _, cmd = build_docker_command(CASE_DIR)
+
+    assert "-i" not in cmd
+
+
+def test_run_validate_uses_attempts_stdin_flag_not_attempts_in_argv(monkeypatch):
+    from lynceus_sec.validator.runner import run_validate
+
+    monkeypatch.setattr(runner, "_docker_available", lambda: True)
+    monkeypatch.setattr(runner, "_image_exists", lambda image: True)
+
+    captured = {}
+
+    def fake_build_docker_command(case_dir, **kwargs):
+        captured.update(kwargs)
+        return "lynceus-sandbox-abc", ["docker", "run", "--rm", "image"]
+
+    monkeypatch.setattr(runner, "build_docker_command", fake_build_docker_command)
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps({"results": []}), stderr="")
+    monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: completed)
+
+    run_validate(CASE_DIR, [{"id": "a1"}])
+
+    assert captured["stdin"] is True
+    assert "--attempts-stdin" in captured["extra_harness_args"]
+    assert "--attempts" not in captured["extra_harness_args"]
+
+
+def test_run_validate_passes_attempts_json_via_subprocess_input_not_cmd(monkeypatch):
+    from lynceus_sec.validator.runner import run_validate
+
+    monkeypatch.setattr(runner, "_docker_available", lambda: True)
+    monkeypatch.setattr(runner, "_image_exists", lambda image: True)
+    monkeypatch.setattr(
+        runner, "build_docker_command",
+        lambda case_dir, **kwargs: ("lynceus-sandbox-abc", ["docker", "run", "--rm", "image"]),
+    )
+
+    captured = {}
+
+    def fake_subprocess_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=json.dumps({"results": []}), stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_subprocess_run)
+
+    attempts = [{"id": "a1"}, {"id": "a2"}]
+    run_validate(CASE_DIR, attempts)
+
+    assert captured["kwargs"]["input"] == json.dumps(attempts)
+    assert "a1" not in captured["cmd"] and "a2" not in captured["cmd"]
+
+
+def test_run_validate_with_many_attempts_does_not_build_a_giant_argv(monkeypatch):
+    """Simula el caso real que disparaba 'argument list too long': 500
+    intentos de un caso con muchos parámetros de texto."""
+    from lynceus_sec.validator.runner import run_validate
+
+    monkeypatch.setattr(runner, "_docker_available", lambda: True)
+    monkeypatch.setattr(runner, "_image_exists", lambda image: True)
+
+    captured = {}
+
+    def fake_subprocess_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=json.dumps({"results": []}), stderr="")
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_subprocess_run)
+
+    attempts = [{"id": f"a{i}", "payload": "x" * 200} for i in range(500)]
+    run_validate(CASE_DIR, attempts)
+
+    cmd_text = " ".join(captured["cmd"])
+    assert len(json.dumps(attempts)) > 100_000  # el tamaño que antes iba en argv
+    assert len(cmd_text) < 2_000  # el argv real ya no depende del número de intentos
+    assert "-i" in captured["cmd"]
+    assert "--attempts-stdin" in captured["cmd"]
+    assert captured["kwargs"]["input"] == json.dumps(attempts)
+
+
 def test_container_name_changes_between_calls():
     name_a, _ = build_docker_command(CASE_DIR)
     name_b, _ = build_docker_command(CASE_DIR)

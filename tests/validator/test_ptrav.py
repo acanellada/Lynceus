@@ -2,8 +2,15 @@ from pathlib import Path
 
 from lynceus_sec.core.model import ReproductionCall
 from lynceus_sec.validator import ptrav
-from lynceus_sec.validator.payloads import build_path_traversal_payloads
-from lynceus_sec.validator.ptrav import attempts_to_findings, build_attempts
+from lynceus_sec.validator.payloads import (
+    build_path_traversal_payloads,
+    build_path_traversal_write_payloads,
+)
+from lynceus_sec.validator.ptrav import (
+    attempts_to_findings,
+    build_attempts,
+    build_write_attempts,
+)
 
 TOOL = {
     "name": "read_doc",
@@ -77,6 +84,190 @@ def test_attempt_ids_are_unique():
 
     ids = [a["id"] for a in attempts]
     assert len(ids) == len(set(ids))
+
+
+# --- build_write_attempts: oráculo de escritura, mismo patrón que build_attempts ---
+
+
+def test_build_write_attempts_covers_every_string_param_with_every_payload_plus_one_control():
+    attempts = build_write_attempts([TOOL])
+    write_payload_count = len(build_path_traversal_write_payloads())
+
+    assert len(attempts) == 2 * (write_payload_count + 1)
+    assert {a["parameter"] for a in attempts} == {"name", "note"}
+
+
+def test_build_write_attempts_tags_write_and_write_positive_control_kinds():
+    attempts = build_write_attempts([TOOL])
+
+    by_kind: dict[str, int] = {}
+    for attempt in attempts:
+        by_kind[attempt["kind"]] = by_kind.get(attempt["kind"], 0) + 1
+
+    write_payload_count = len(build_path_traversal_write_payloads())
+    assert by_kind == {"write": 2 * write_payload_count, "write_positive_control": 2}
+
+
+def test_build_write_attempts_threads_a_custom_fs_root_into_target_paths():
+    attempts = build_write_attempts([TOOL], fs_root="/tmp/otro-limite")
+
+    controls = [a for a in attempts if a["kind"] == "write_positive_control"]
+    assert controls
+    for control in controls:
+        assert control["write_target_path"].startswith("/tmp/otro-limite/")
+
+
+def test_write_attempts_required_non_string_params_get_neutral_values():
+    attempts = build_write_attempts([TOOL])
+
+    for attempt in attempts:
+        assert attempt["arguments"]["max_bytes"] == 0
+
+
+def test_write_attempts_targeted_param_holds_the_target_path():
+    attempts = build_write_attempts([TOOL])
+
+    for attempt in attempts:
+        assert attempt["arguments"][attempt["parameter"]] == attempt["payload"]
+
+
+def test_write_attempts_other_string_params_hold_the_token():
+    attempts = build_write_attempts([TOOL])
+
+    for attempt in attempts:
+        other_string_param = "note" if attempt["parameter"] == "name" else "name"
+        assert attempt["arguments"][other_string_param] == attempt["write_token"]
+
+
+def test_write_attempts_carry_target_path_and_token_under_tmp():
+    attempts = build_write_attempts([TOOL])
+
+    for attempt in attempts:
+        assert attempt["write_token"]
+        assert attempt["write_target_path"].startswith("/tmp/")
+        assert attempt["environment_markers"] == ("modulenotfounderror",)
+
+
+def test_write_attempt_ids_are_unique():
+    attempts = build_write_attempts([TOOL])
+
+    ids = [a["id"] for a in attempts]
+    assert len(ids) == len(set(ids))
+
+
+def test_only_the_symlink_write_technique_carries_symlink_fields():
+    attempts = build_write_attempts([TOOL])
+
+    for attempt in attempts:
+        if attempt["technique"] == "symlink_write":
+            assert attempt["symlink_path"] is not None
+            assert attempt["symlink_target"] is not None
+            # El enlace apunta directamente a la ruta objetivo (enlace
+            # "colgante"), no a una carpeta como en lectura.
+            assert attempt["symlink_target"] == attempt["write_target_path"]
+        elif attempt["kind"] == "write":
+            assert attempt["symlink_path"] is None
+            assert attempt["symlink_target"] is None
+
+
+# --- build_write_attempts con tres parámetros de texto: write_file_tool(path,
+# content, encoding), el caso real de filesystem-mcp-server v1.0.0 donde
+# "encoding" recibía el token por error y todas las técnicas salían
+# not_confirmed. Ninguno de los tests de arriba (con TOOL, dos parámetros de
+# texto) lo detecta: con solo un candidato a contenido posible, el diseño
+# nuevo coincide exactamente con el anterior.
+
+THREE_TEXT_PARAM_TOOL = {
+    "name": "write_file_tool",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "encoding": {"type": "string"},
+        },
+        "required": ["path", "content", "encoding"],
+    },
+}
+
+
+def test_build_write_attempts_generates_one_variant_per_other_text_param_as_content_candidate():
+    attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+    write_payload_count = len(build_path_traversal_write_payloads())
+
+    # S=3 parámetros de texto: S*(S-1)=6 combinaciones (path_param,
+    # content_param); con 6 técnicas cada una, 36 intentos "write" más 6
+    # controles positivos.
+    by_kind: dict[str, int] = {}
+    for attempt in attempts:
+        by_kind[attempt["kind"]] = by_kind.get(attempt["kind"], 0) + 1
+    assert by_kind == {
+        "write": 3 * 2 * write_payload_count,
+        "write_positive_control": 3 * 2,
+    }
+
+
+def test_build_write_attempts_tries_each_other_text_param_as_content_in_turn():
+    attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+
+    for path_param in ("path", "content", "encoding"):
+        content_candidates = {a["content_parameter"] for a in attempts if a["parameter"] == path_param}
+        expected = {"path", "content", "encoding"} - {path_param}
+        assert content_candidates == expected
+
+
+def test_build_write_attempts_path_param_never_receives_the_token():
+    attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+
+    for attempt in attempts:
+        assert attempt["arguments"][attempt["parameter"]] != attempt["write_token"]
+        assert attempt["arguments"][attempt["parameter"]] == attempt["payload"]
+
+
+def test_build_write_attempts_content_param_receives_the_token():
+    attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+
+    for attempt in attempts:
+        assert attempt["arguments"][attempt["content_parameter"]] == attempt["write_token"]
+
+
+def test_build_write_attempts_third_text_param_gets_the_neutral_default_not_the_token():
+    """El bug real: con path_param="path" y content_param="content",
+    "encoding" no debe recibir el token (que rompería la llamada), sino un
+    valor neutro válido ("utf-8")."""
+    attempts = build_write_attempts([THREE_TEXT_PARAM_TOOL])
+
+    for attempt in attempts:
+        other_params = {"path", "content", "encoding"} - {attempt["parameter"], attempt["content_parameter"]}
+        for other in other_params:
+            assert attempt["arguments"][other] == "utf-8"
+            assert attempt["arguments"][other] != attempt["write_token"]
+
+
+def test_build_write_attempts_skips_a_text_param_with_no_other_text_param_to_carry_the_token():
+    """S=1: sin otro parámetro de texto no hay dónde poner el token, y sin
+    token `_confirm_write` nunca podría confirmar nada; no tiene sentido
+    generar la llamada."""
+    tool = {
+        "name": "touch_file_tool",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    }
+
+    assert build_write_attempts([tool]) == []
+
+
+def test_build_write_attempts_two_text_params_matches_the_design_before_this_change():
+    """Con S=2 solo hay un candidato a contenido posible por path_param:
+    el nuevo diseño coincide exactamente con el anterior (14 intentos para
+    TOOL), sin ningún cambio de comportamiento en el caso común."""
+    attempts = build_write_attempts([TOOL])
+    write_payload_count = len(build_path_traversal_write_payloads())
+
+    assert len(attempts) == 2 * (write_payload_count + 1)
 
 
 def _attempt(attempt_id="id-1", tool="read_doc", parameter="name", technique="dotdot_outside"):
@@ -178,6 +369,92 @@ def test_positive_control_with_missing_result_is_reported_separately_from_inconc
     assert positive_controls[0]["status"] == "inconclusive"
 
 
+def _write_attempt(attempt_id="id-1", tool="write_doc", parameter="path", technique="dotdot_outside_write"):
+    return {
+        "id": attempt_id,
+        "kind": "write",
+        "tool": tool,
+        "parameter": parameter,
+        "technique": technique,
+        "payload": "../../../../../../../../tmp/lynceus-outside/x",
+        "write_target_path": "/tmp/lynceus-outside/x",
+        "write_token": "lynceus-write-abc",
+        "environment_markers": ("modulenotfounderror",),
+        "arguments": {"path": "../../../../../../../../tmp/lynceus-outside/x", "content": "lynceus-write-abc"},
+    }
+
+
+def test_confirmed_write_attempt_produces_a_finding_naming_the_write_direction():
+    attempts = [_write_attempt("id-1")]
+    results = [{"id": "id-1", "status": "confirmed", "detail": None}]
+
+    findings, inconclusive, positive_controls = attempts_to_findings("ptrav-01-vulnerable", attempts, results)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.validated is True
+    assert finding.tool == "write_doc"
+    assert finding.vuln_class.value == "path_traversal"
+    assert finding.parameter == "path"
+    assert finding.technique == "dotdot_outside_write"
+    assert "escritura" in finding.message
+    assert "/tmp/lynceus-outside/x" in finding.evidence
+    assert finding.reproduction == [
+        ReproductionCall(
+            tool="write_doc",
+            arguments={"path": "../../../../../../../../tmp/lynceus-outside/x", "content": "lynceus-write-abc"},
+        )
+    ]
+    assert inconclusive == []
+    assert positive_controls == []
+
+
+def test_confirmed_read_attempt_still_names_the_read_direction():
+    attempts = [_attempt("id-1")]
+    results = [{"id": "id-1", "status": "confirmed", "detail": None}]
+
+    findings, _inconclusive, _positive_controls = attempts_to_findings("ptrav-01-vulnerable", attempts, results)
+
+    assert "lectura" in findings[0].message
+
+
+def test_not_confirmed_write_attempt_is_silently_dropped():
+    attempts = [_write_attempt("id-1")]
+    results = [{"id": "id-1", "status": "not_confirmed", "detail": None}]
+
+    findings, inconclusive, positive_controls = attempts_to_findings("ptrav-01-vulnerable", attempts, results)
+
+    assert findings == []
+    assert inconclusive == []
+    assert positive_controls == []
+
+
+def test_inconclusive_write_attempt_is_reported_separately():
+    attempts = [_write_attempt("id-1")]
+    results = [{"id": "id-1", "status": "inconclusive", "detail": "la ruta objetivo ya existía"}]
+
+    findings, inconclusive, positive_controls = attempts_to_findings("ptrav-01-vulnerable", attempts, results)
+
+    assert findings == []
+    assert len(inconclusive) == 1
+    assert positive_controls == []
+
+
+def test_write_positive_control_attempts_never_produce_findings_and_report_their_status():
+    control_attempt = _write_attempt("id-1")
+    control_attempt["kind"] = "write_positive_control"
+    results = [{"id": "id-1", "status": "confirmed", "detail": None}]
+
+    findings, inconclusive, positive_controls = attempts_to_findings(
+        "ptrav-01-vulnerable", [control_attempt], results
+    )
+
+    assert findings == []
+    assert inconclusive == []
+    assert len(positive_controls) == 1
+    assert positive_controls[0]["status"] == "confirmed"
+
+
 # --- validate_case: --image / --server-python se reenvían a run_harness ---
 
 
@@ -243,7 +520,12 @@ def test_validate_case_splits_attempts_across_multiple_containers_when_jobs_abov
         ctx.shutdown()
 
     payload_count = len(build_path_traversal_payloads())
-    total_attempts = 2 * (payload_count + 1)  # "name" y "note", ver TOOL arriba
+    write_payload_count = len(build_path_traversal_write_payloads())
+    # "name" y "note" (ver TOOL arriba), cada uno con sus cargas de lectura +
+    # control positivo de lectura, más sus cargas de escritura + control
+    # positivo de escritura: validate_case combina ambos (ver build_attempts
+    # + build_write_attempts en ptrav.validate_case).
+    total_attempts = 2 * (payload_count + 1 + write_payload_count + 1)
     assert len(container_names) == 3
     assert len(set(container_names)) == 3
     assert sum(attempt_counts) == total_attempts
