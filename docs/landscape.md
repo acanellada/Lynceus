@@ -187,6 +187,14 @@ Lecciones de método: la primera versión de los manifiestos tomaba el resultado
 
 Limitaciones: muestra pequeña; un caso sin versión corregida; sin control positivo en SSRF.
 
+## Oráculo de escritura para path traversal (16/11/2026)
+
+La primera medición sobre casos reales dejó un falso negativo: write_file_tool del CVE-2026-7400, porque el oráculo de path traversal solo confirmaba lecturas. Se añadió la confirmación de escrituras: Lynceus elige una ruta de escape fuera del límite (carpeta aparte, carpeta hermana con el mismo prefijo, o a través de un enlace simbólico colgante), comprueba que no existe, llama a la herramienta con un token propio, y confirma solo si aparece un fichero en esa ruta con el token.
+
+Dos fallos propios que destapó el desarrollo, ya corregidos: los intentos se pasaban al harness como argumento de la línea de comandos, y con lectura más escritura superaban el límite del sistema (argument list too long); ahora van por la entrada estándar. Y el token se ponía en todos los demás parámetros de texto, incluido encoding, lo que rompía la escritura; ahora se prueba cada parámetro de texto por turnos como portador del contenido, y los demás reciben un valor neutro válido.
+
+Resultado: sobre las 5 versiones reales, el recall sube de 0,75 a 1,00 (TP=4, FP=0, FN=0). El caso corregido sigue sin hallazgos, así que el oráculo de escritura no introduce falsos positivos. Límite conocido: una vulnerabilidad de escritura cuyo único efecto sea un cambio de estado interno no observable desde el sistema de ficheros (por ejemplo, git_add, que solo prepara en el índice) sigue fuera de alcance.
+
 ## Hallazgos
 
 ### Cisco mcp-scanner

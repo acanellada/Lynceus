@@ -98,13 +98,13 @@ Los tres casos anteriores están descritos en `benchmark/real/`, con el commit e
 
 | Caso | Versión | Esperado | Obtenido | Resultado |
 |---|---|---|---|---|
-| CVE-2026-7400 | Vulnerable | `read_file_tool`, `write_file_tool` | `read_file_tool` | Falso negativo en `write_file_tool` |
+| CVE-2026-7400 | Vulnerable | `read_file_tool`, `write_file_tool` | `read_file_tool`, `write_file_tool` | Correcto |
 | CVE-2026-7400 | Corregida | — | — | Correcto |
 | CVE-2026-7812 | Vulnerable | `git_operation` | `git_operation` | Correcto |
 | `mcp-server-fetch` (issue #4838) | Vulnerable | `fetch` | `fetch` | Correcto |
 | `mcp-server-fetch` (issue #4838) | Corregida | — | — | Correcto |
 
-Resultado global: precisión 1,00 y recall 0,75 (3 verdaderos positivos, 0 falsos positivos, 1 falso negativo). El falso negativo es real: el oráculo de path traversal detecta lecturas fuera del límite, pero no escrituras, y el CVE-2026-7400 permite ambas. Cinco versiones son una muestra pequeña.
+Resultado global: precisión 1,00 y recall 1,00 (4 verdaderos positivos, 0 falsos positivos, 0 falsos negativos). El oráculo de path traversal detecta tanto lecturas como escrituras fuera del límite: para la escritura, Lynceus comprueba que aparece un fichero con su token en una ruta de escape que no existía antes de la llamada. Cinco versiones siguen siendo una muestra pequeña.
 
 ## Inicio rápido
 
