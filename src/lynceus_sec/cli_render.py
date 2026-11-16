@@ -811,8 +811,10 @@ def render_build_result(console: Console, result, *, plain: bool) -> None:
         console.print(warning_text)
 
 
-def render_report_paths(console: Console, *, json_path: str | None, report_path: str | None, plain: bool) -> None:
-    for label, path in (("JSON", json_path), ("HTML", report_path)):
+def render_report_paths(
+    console: Console, *, json_path: str | None, report_path: str | None, plain: bool, sarif_path: str | None = None,
+) -> None:
+    for label, path in (("JSON", json_path), ("HTML", report_path), ("SARIF", sarif_path)):
         if path is None:
             continue
         if plain:

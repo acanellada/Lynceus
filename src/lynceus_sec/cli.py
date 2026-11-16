@@ -45,6 +45,7 @@ from lynceus_sec.cli_render import (
     render_target_image,
     run_with_progress,
 )
+from lynceus_sec.cli_sarif import build_sarif_report
 from lynceus_sec.core.metrics import compute_metrics
 from lynceus_sec.core.model import Finding, Label
 from lynceus_sec.report import CAPABILITY_EXPLANATION, CLASS_LABELS, group_findings
@@ -390,6 +391,7 @@ def scan(
     ),
     json_path: Path | None = typer.Option(None, "--json", help="Ruta donde escribir el informe JSON."),  # noqa: B008
     report_path: Path | None = typer.Option(None, "--report", help="Ruta donde escribir el informe HTML."),  # noqa: B008
+    sarif_path: Path | None = typer.Option(None, "--sarif", help="Ruta donde escribir el informe SARIF 2.1.0."),  # noqa: B008
     fs_root: str = typer.Option(
         DEFAULT_FS_ROOT, "--fs-root",
         help="Límite de sistema de ficheros del servidor analizado (HOME dentro del sandbox); "
@@ -562,10 +564,19 @@ def scan(
         )
         report_path.write_text(html_text)
 
+    if sarif_path is not None:
+        sarif_payload = build_sarif_report(
+            target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
+            inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
+            capabilities_by_class=capabilities_by_class, elapsed_seconds=elapsed, environment=environment,
+        )
+        sarif_path.write_text(jsonlib.dumps(sarif_payload, indent=2, ensure_ascii=False))
+
     render_report_paths(
         console,
         json_path=str(json_path) if json_path is not None else None,
         report_path=str(report_path) if report_path is not None else None,
+        sarif_path=str(sarif_path) if sarif_path is not None else None,
         plain=plain_mode,
     )
 
