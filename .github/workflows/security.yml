@@ -1,0 +1,45 @@
+name: Security scan
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar uv (versión y hash fijados)
+        run: python -m pip install --no-cache-dir --require-hashes -r sandbox/resolver/requirements.txt
+
+      - name: Instalar dependencias desde uv.lock
+        run: uv sync --locked
+
+      - name: Construir la imagen del sandbox
+        run: docker build -t lynceus-sandbox:0.1 sandbox/
+
+      # cmdi-01-vulnerable es vulnerable a propósito (benchmark/cases): el
+      # exit code 1 es el resultado esperado, no un fallo del workflow.
+      - name: Escanear un caso vulnerable del benchmark
+        id: scan
+        continue-on-error: true
+        run: uv run lynceus scan benchmark/cases/cmdi-01-vulnerable --classes command_injection --sarif lynceus.sarif
+
+      - name: Subir el informe SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: lynceus.sarif

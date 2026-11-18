@@ -171,6 +171,35 @@ uv run lynceus bench --classes command_injection
 
 El formato se desactiva solo si existe la variable `NO_COLOR` o si la salida no es una terminal interactiva (al redirigirla a un fichero o a una tubería).
 
+## Integración con CI
+
+`action.yml`, en la raíz de este repositorio, es una composite action reutilizable: otro proyecto puede invocarla sobre su propio servidor MCP sin instalar nada más que Docker. Ella misma instala uv, sincroniza las dependencias de Lynceus y construye el sandbox; solo hace falta pasarle la carpeta del servidor.
+
+```yaml
+name: Security scan
+on: [push]
+permissions:
+  security-events: write
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: acanellada/Lynceus@<tag-o-sha>
+        with:
+          target: ./mi-servidor-mcp
+          sarif-output: lynceus.sarif
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: always()
+        with:
+          sarif_file: lynceus.sarif
+```
+
+`.github/workflows/security.yml`, en este mismo repositorio, es un ejemplo funcionando: escanea un caso del benchmark con una vulnerabilidad conocida y sube el SARIF a la pestaña de Security.
+
+**El servidor que pasas en `target` se ejecuta en el runner** que invoca la action, dentro del sandbox Docker de `lynceus scan` pero sin el aislamiento de red y host propio del runner. Úsala solo sobre servidores MCP propios o de confianza explícita.
+
 ## Seguridad del sandbox
 
 El servidor analizado es código no confiable. Lynceus lo ejecuta siempre dentro de un contenedor con estas protecciones:

@@ -1,0 +1,96 @@
+name: 'Lynceus scan'
+description: >-
+  Valida dinámicamente un servidor MCP con Lynceus y genera un informe SARIF.
+  AVISO: `target` es código que se ejecuta en este runner (dentro del sandbox
+  Docker endurecido de `lynceus scan`, pero sin el aislamiento de red y host
+  propio del runner). Usa esta action solo sobre servidores MCP propios o de
+  confianza explícita: nunca sobre código de origen desconocido.
+author: 'Lynceus'
+
+inputs:
+  target:
+    description: 'Carpeta del servidor MCP a analizar, relativa al workspace del workflow que invoca esta action.'
+    required: true
+  classes:
+    description: >-
+      Clases a validar, separadas por espacios (p.ej. "command_injection
+      path_traversal"). Por defecto, las tres.
+    required: false
+    default: ''
+  entry:
+    description: 'Fichero con el que arranca el servidor, relativo a target. Por defecto, server.py.'
+    required: false
+    default: ''
+  pythonpath:
+    description: 'Carpetas (relativas a target, separadas por espacios) que se añaden al PYTHONPATH del servidor.'
+    required: false
+    default: ''
+  image:
+    description: 'Imagen creada con `lynceus build`, con las dependencias propias del servidor.'
+    required: false
+    default: ''
+  fs-root:
+    description: 'Límite de sistema de ficheros para path traversal, bajo /tmp.'
+    required: false
+    default: ''
+  sarif-output:
+    description: 'Ruta donde escribir el informe SARIF, relativa al workspace del workflow que invoca esta action.'
+    required: false
+    default: 'lynceus.sarif'
+
+outputs:
+  exit-code:
+    description: 'Código de salida de `lynceus scan`: 0 sin hallazgos, 1 con hallazgos confirmados, 2 error.'
+    value: ${{ steps.scan.outputs.exit-code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Instalar uv (versión y hash fijados)
+      shell: bash
+      run: python -m pip install --no-cache-dir --require-hashes -r "${{ github.action_path }}/sandbox/resolver/requirements.txt"
+
+    - name: Instalar dependencias de Lynceus desde uv.lock
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: uv sync --locked
+
+    - name: Construir la imagen del sandbox
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: docker build -t lynceus-sandbox:0.1 sandbox/
+
+    # Los valores de las entradas viajan por variables de entorno (nunca
+    # interpolados con ${{ }} dentro del script) para que un `target` o
+    # `classes` controlado por quien invoca la action no pueda inyectar
+    # comandos en este paso.
+    - name: Ejecutar lynceus scan
+      id: scan
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        LYNCEUS_TARGET: ${{ github.workspace }}/${{ inputs.target }}
+        LYNCEUS_CLASSES: ${{ inputs.classes }}
+        LYNCEUS_ENTRY: ${{ inputs.entry }}
+        LYNCEUS_PYTHONPATH: ${{ inputs.pythonpath }}
+        LYNCEUS_IMAGE: ${{ inputs.image }}
+        LYNCEUS_FS_ROOT: ${{ inputs.fs-root }}
+        LYNCEUS_SARIF_OUTPUT: ${{ github.workspace }}/${{ inputs.sarif-output }}
+      run: |
+        args=("$LYNCEUS_TARGET" --sarif "$LYNCEUS_SARIF_OUTPUT")
+        for c in $LYNCEUS_CLASSES; do args+=(--classes "$c"); done
+        [ -n "$LYNCEUS_ENTRY" ] && args+=(--entry "$LYNCEUS_ENTRY")
+        for p in $LYNCEUS_PYTHONPATH; do args+=(--pythonpath "$p"); done
+        [ -n "$LYNCEUS_IMAGE" ] && args+=(--image "$LYNCEUS_IMAGE")
+        [ -n "$LYNCEUS_FS_ROOT" ] && args+=(--fs-root "$LYNCEUS_FS_ROOT")
+
+        set +e
+        uv run lynceus scan "${args[@]}"
+        code=$?
+        set -e
+
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
