@@ -4,11 +4,14 @@ el workflow de CI). pyyaml ya es una dependencia del proyecto (pyproject.toml)."
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
 
 ACTION_PATH = Path(__file__).resolve().parent.parent / "action.yml"
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _load_action() -> dict:
@@ -84,3 +87,20 @@ def test_action_documents_target_runs_on_the_caller_runner():
     action = _load_action()
     assert "runner" in action["description"].lower()
     assert "confianza" in action["description"].lower()
+
+
+def test_action_external_actions_are_pinned_by_commit_sha():
+    action = _load_action()
+    for step in action["runs"]["steps"]:
+        uses = step.get("uses")
+        if uses is None or uses.startswith("./"):
+            continue
+        _action_ref, _, ref = uses.partition("@")
+        assert _SHA_RE.match(ref), f"acción externa no fijada por SHA de 40 hex: {uses!r}"
+
+
+def test_action_passes_sarif_root_as_runner_workspace():
+    action = _load_action()
+    scan_step = next(s for s in action["runs"]["steps"] if s.get("id") == "scan")
+    assert scan_step["env"]["LYNCEUS_SARIF_ROOT"] == "${{ github.workspace }}"
+    assert "--sarif-root" in scan_step["run"]

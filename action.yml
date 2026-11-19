@@ -46,7 +46,7 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: '3.12'
 
@@ -80,8 +80,12 @@ runs:
         LYNCEUS_IMAGE: ${{ inputs.image }}
         LYNCEUS_FS_ROOT: ${{ inputs.fs-root }}
         LYNCEUS_SARIF_OUTPUT: ${{ github.workspace }}/${{ inputs.sarif-output }}
+        LYNCEUS_SARIF_ROOT: ${{ github.workspace }}
       run: |
-        args=("$LYNCEUS_TARGET" --sarif "$LYNCEUS_SARIF_OUTPUT")
+        # target se resuelve como ruta absoluta del runner: sin --sarif-root,
+        # la URI del SARIF saldría absoluta y GitHub no la enlazaría con el
+        # fichero del repositorio que invoca esta action.
+        args=("$LYNCEUS_TARGET" --sarif "$LYNCEUS_SARIF_OUTPUT" --sarif-root "$LYNCEUS_SARIF_ROOT")
         for c in $LYNCEUS_CLASSES; do args+=(--classes "$c"); done
         [ -n "$LYNCEUS_ENTRY" ] && args+=(--entry "$LYNCEUS_ENTRY")
         for p in $LYNCEUS_PYTHONPATH; do args+=(--pythonpath "$p"); done

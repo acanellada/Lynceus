@@ -79,3 +79,12 @@ def test_does_not_add_a_new_third_party_action():
         if uses is None:
             continue
         assert uses.startswith(("actions/", "github/codeql-action/")), f"acción de terceros no esperada: {uses}"
+
+
+def test_all_external_actions_are_pinned_by_commit_sha():
+    for step in _steps():
+        uses = step.get("uses")
+        if uses is None or uses.startswith("./"):
+            continue
+        _action_ref, _, ref = uses.partition("@")
+        assert _SHA_RE.match(ref), f"acción externa no fijada por SHA de 40 hex: {uses!r}"

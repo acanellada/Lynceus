@@ -4,9 +4,13 @@ hash de uv.lock como clave, y aparecer antes de `uv sync --locked`."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 CI_WORKFLOW_PATH = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+
+_USES_RE = re.compile(r"^uses:\s*(\S+)$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _ci_workflow_text() -> str:
@@ -41,3 +45,16 @@ def test_ci_workflow_does_not_add_a_new_third_party_action():
         stripped = line.strip()
         if stripped.startswith("uses:"):
             assert stripped.startswith("uses: actions/"), f"acción de terceros no esperada: {stripped}"
+
+
+def test_ci_workflow_external_actions_are_pinned_by_commit_sha():
+    text = _ci_workflow_text()
+    for line in text.splitlines():
+        match = _USES_RE.match(line.strip())
+        if match is None:
+            continue
+        uses = match.group(1)
+        if uses.startswith("./"):
+            continue
+        _action_ref, _, ref = uses.partition("@")
+        assert _SHA_RE.match(ref), f"acción externa no fijada por SHA de 40 hex: {uses!r}"

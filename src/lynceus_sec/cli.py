@@ -392,6 +392,12 @@ def scan(
     json_path: Path | None = typer.Option(None, "--json", help="Ruta donde escribir el informe JSON."),  # noqa: B008
     report_path: Path | None = typer.Option(None, "--report", help="Ruta donde escribir el informe HTML."),  # noqa: B008
     sarif_path: Path | None = typer.Option(None, "--sarif", help="Ruta donde escribir el informe SARIF 2.1.0."),  # noqa: B008
+    sarif_root: str | None = typer.Option(
+        None, "--sarif-root",
+        help="Si target cae dentro de esta ruta, la URI del SARIF se escribe relativa a ella "
+        "(para que GitHub la enlace con el fichero del repositorio que invoca el scan); "
+        "si no se indica, o target queda fuera, se usa la ruta completa.",
+    ),
     fs_root: str = typer.Option(
         DEFAULT_FS_ROOT, "--fs-root",
         help="Límite de sistema de ficheros del servidor analizado (HOME dentro del sandbox); "
@@ -566,7 +572,8 @@ def scan(
 
     if sarif_path is not None:
         sarif_payload = build_sarif_report(
-            target=str(target), classes=normalized_classes, fs_root=fs_root, findings=all_findings,
+            target=str(target), classes=normalized_classes, fs_root=fs_root, entry=entry, sarif_root=sarif_root,
+            findings=all_findings,
             inconclusive_by_class=inconclusive_by_class, positive_controls_by_class=positive_controls_by_class,
             capabilities_by_class=capabilities_by_class, elapsed_seconds=elapsed, environment=environment,
         )
